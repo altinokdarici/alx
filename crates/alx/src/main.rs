@@ -1,4 +1,4 @@
-//! alx dev CLI: a line-based REPL, equivalent to the original `agent.ts`.
+//! alx dev CLI: a line-based REPL.
 //!
 //! This is just one client of the core. It wires the pluggable parts together
 //! in `build_agent` and renders core events in `CliRenderer`.
