@@ -48,6 +48,9 @@ history if you need it as a reference.
 - `cargo test` must pass. Core logic is tested with fake `Provider`/`Executor`
   implementations, with no network needed.
 - `cargo clippy --all-targets` and `cargo fmt` must both be clean.
+- A tracked pre-commit hook (`.githooks/pre-commit`) runs `cargo fmt --check` and
+  `cargo clippy --all-targets -D warnings`. Enable it once per clone with
+  `git config core.hooksPath .githooks`.
 - `./run.sh` starts the REPL, always with the Copilot provider. `cargo run`
   starts it with whatever the environment or `.env` selects:
   - `ALX_PROVIDER`: `anthropic` (default, needs `CLAUDE_API_KEY`) or
