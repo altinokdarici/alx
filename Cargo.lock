@@ -24,6 +24,7 @@ dependencies = [
  "alx-core",
  "anyhow",
  "clap",
+ "serde_json",
  "tokio",
 ]
 

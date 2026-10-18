@@ -41,7 +41,8 @@ history if you need it as a reference.
 - `crates/alx-protocol`: wire types shared by core and clients (messages, tool specs, events)
 - `crates/alx-core`: agent loop, traits, built-in implementations, and
   `agent_from_env` / `load_dotenv`, the default wiring for binaries
-- `crates/alx-cli`: the `alx` binary, an interactive line-based REPL
+- `crates/alx-cli`: the `alx` binary, an interactive line-based REPL;
+  `render.rs` formats events (ANSI color on a TTY, off with `NO_COLOR`)
 - `alx-cli` calls `alx-core` directly, in-process. A headless server and the
   transport clients use to reach it are still to be designed.
 
@@ -54,6 +55,9 @@ history if you need it as a reference.
   `cargo clippy --all-targets -D warnings`. `cargo-husky` installs it
   automatically on the first `cargo test`. CI (`.github/workflows/ci.yml`)
   runs the same checks plus `cargo test`.
+- Commits: end every commit message with a blank line and the trailer
+  `Co-authored-by: alx <alx@altinok.dev>`. Subjects use conventional prefixes
+  (`feat(alx):`, `chore:`, `docs(alx):`, `refactor:`); see `git log` for examples.
 - `./run.sh` starts the REPL with `--provider copilot`; `cargo run` starts it
   with whatever the settings select.
 - Settings (`alx-core/src/settings.rs`) are layered, each overriding the one

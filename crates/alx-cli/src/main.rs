@@ -4,11 +4,12 @@
 //! `alx_core::agent_from_settings`; this crate only reads input and renders core
 //! events in `CliRenderer`.
 
-use alx_core::protocol::{Event, Message, StopReason};
-use alx_core::{
-    AgentLoop, EventSink, InMemorySessionStore, ProviderKind, Session, SessionStore, Settings,
-};
+mod render;
+
+use alx_core::protocol::{Message, StopReason};
+use alx_core::{AgentLoop, InMemorySessionStore, ProviderKind, Session, SessionStore, Settings};
 use clap::Parser;
+use render::{CliRenderer, Style};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -27,37 +28,6 @@ struct Cli {
     /// Use this config file instead of `./alx.toml`.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-}
-
-/// Plain stdout/stderr rendering of core events.
-struct CliRenderer;
-
-impl EventSink for CliRenderer {
-    fn emit(&self, event: Event) {
-        match event {
-            Event::ModelRequest => println!("Making request to the LLM provider"),
-            Event::AssistantText { text } => println!("\nAssistant: {text}\n"),
-            Event::ToolCallStarted { name, input, .. } => {
-                match input.get("input").and_then(|v| v.as_str()) {
-                    Some(script) if name == "bash" => println!("$ {script}"),
-                    _ => println!("[{name}] {input}"),
-                }
-            }
-            Event::ToolCallFinished {
-                output, is_error, ..
-            } => {
-                if is_error {
-                    eprintln!("{output}");
-                } else {
-                    println!("{output}");
-                }
-            }
-            Event::TurnFinished {
-                model: Some(model), ..
-            } => println!("[model: {model}]\n"),
-            Event::TurnStarted | Event::TurnFinished { .. } => {}
-        }
-    }
 }
 
 /// Process exit codes. `end_turn` is the only "successful" way for a turn to finish.
@@ -93,17 +63,18 @@ async fn run() -> anyhow::Result<u8> {
     });
     let agent = alx_core::agent_from_settings(&settings)?;
     let info = agent.provider.info();
+    let style = Style::detect();
     println!(
-        "alx · provider: {} · model: {}\n",
-        info.name,
-        info.model.as_deref().unwrap_or("provider default")
+        "{}",
+        render::banner(&style, &info.name, info.model.as_deref())
     );
+    let renderer = CliRenderer { style };
     let store = InMemorySessionStore::default();
     let mut session = Session::new("cli");
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
 
     loop {
-        print!("It's your turn (type 'exit' to quit): ");
+        print!("{}", render::prompt(&style));
         std::io::stdout().flush()?;
         let Some(line) = lines.next_line().await? else {
             break;
@@ -117,13 +88,13 @@ async fn run() -> anyhow::Result<u8> {
         }
 
         let stop = match agent
-            .run_turn(&mut session, Message::user_text(input), &CliRenderer)
+            .run_turn(&mut session, Message::user_text(input), &renderer)
             .await
         {
             Ok(stop) => stop,
             Err(e) => {
                 // The session was rolled back, so the user can just try again.
-                eprintln!("error: {e:#}");
+                eprintln!("{}", render::error_line(&style, &format!("{e:#}")));
                 continue;
             }
         };
