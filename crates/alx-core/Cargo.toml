@@ -19,3 +19,7 @@ github-copilot-sdk = { workspace = true, optional = true }
 default = ["copilot"]
 # GitHub Copilot as a provider (via the Copilot SDK and the `copilot` CLI).
 copilot = ["dep:github-copilot-sdk"]
+
+[dev-dependencies]
+# Installs .cargo-husky/hooks/* into .git/hooks on the first `cargo test`/`clippy`.
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

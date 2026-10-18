@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs fmt and clippy before every commit. Enable with: git config core.hooksPath .githooks
+# Installed into .git/hooks by cargo-husky on the first `cargo test` or `cargo clippy`.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
