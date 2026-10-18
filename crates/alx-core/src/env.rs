@@ -14,14 +14,27 @@ use std::sync::Arc;
 /// Swap any part here: another `Provider`, `Executor` (Docker, remote, ...),
 /// more tools, or a different `AgentLoop` entirely.
 pub fn agent_from_settings(settings: &Settings) -> anyhow::Result<SingleAgent> {
+    let mut config = AgentConfig::default();
+    if let Ok(instructions) = std::fs::read_to_string("AGENTS.md") {
+        config.system_prompt = with_instructions(&config.system_prompt, &instructions);
+    }
     Ok(SingleAgent {
-        config: AgentConfig::default(),
+        config,
         provider: provider_from_settings(settings)?,
         tools: ToolRegistry::new().with(BashTool),
         tool_ctx: ToolContext {
             executor: Arc::new(LocalExecutor),
         },
     })
+}
+
+/// Appends project instructions (the contents of `./AGENTS.md`) to the system
+/// prompt, fenced so the model can tell them from alx's own prompt.
+fn with_instructions(system_prompt: &str, instructions: &str) -> String {
+    format!(
+        "{system_prompt}\n\n<project_instructions source=\"AGENTS.md\">\n{}\n</project_instructions>",
+        instructions.trim()
+    )
 }
 
 /// The LLM backend named by `settings.provider` (default `anthropic`).
@@ -90,6 +103,13 @@ fn parse_dotenv(contents: &str) -> impl Iterator<Item = (&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appends_instructions_to_the_system_prompt() {
+        let prompt = with_instructions("base", "\nbe terse\n");
+        assert!(prompt.starts_with("base\n\n<project_instructions"));
+        assert!(prompt.contains("\nbe terse\n</project_instructions>"));
+    }
 
     #[test]
     fn parses_dotenv_lines() {

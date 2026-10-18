@@ -32,6 +32,8 @@ history if you need it as a reference.
   and comes back as a `ToolUse`; alx's loop runs it and the next `complete`
   resolves the pending call. The SDK's CLI download at build time is turned
   off in `.cargo/config.toml`.
+- `./AGENTS.md` in the working directory, if present, is appended to the system
+  prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
 - v1 scope: single agent, local execution, no MCP.
 
 ## Layout
