@@ -111,6 +111,16 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+/// Which LLM backend an agent talks to, for clients to display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    /// Short provider id, e.g. `anthropic` or `copilot`.
+    pub name: String,
+    /// The configured model, or `None` when the provider picks its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 /// Events emitted by the core while running a turn. UIs (CLI, TUI, web, ...)
 /// render these; they never reach into the core directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +145,11 @@ pub enum Event {
     },
     TurnFinished {
         stop_reason: StopReason,
+        /// The model that produced the turn's last response, if the provider
+        /// reported it. It can differ from the configured one (e.g. Copilot's
+        /// default or automatic model selection).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
 }
 
@@ -172,6 +187,7 @@ mod tests {
     fn event_wire_shape() {
         let e = Event::TurnFinished {
             stop_reason: StopReason::EndTurn,
+            model: None,
         };
         assert_eq!(
             serde_json::to_value(&e).unwrap(),

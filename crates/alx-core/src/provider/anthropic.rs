@@ -1,7 +1,7 @@
 //! Anthropic Messages API (non-streaming for now).
 
 use super::{CompletionRequest, CompletionResponse, Provider};
-use alx_protocol::{ContentBlock, Message, Role};
+use alx_protocol::{ContentBlock, Message, ProviderInfo, Role};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -123,11 +123,19 @@ fn response_from_wire(data: Value) -> anyhow::Result<CompletionResponse> {
     Ok(CompletionResponse {
         content,
         stop_reason,
+        model: data.get("model").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            name: "anthropic".into(),
+            model: Some(self.config.model.clone()),
+        }
+    }
+
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let resp = self
@@ -179,6 +187,7 @@ mod tests {
     fn parses_response_and_skips_unknown_blocks() {
         let r = response_from_wire(json!({
             "id": "msg_1",
+            "model": "claude-x",
             "stop_reason": "tool_use",
             "content": [
                 {"type": "thinking", "thinking": "..."},
@@ -189,5 +198,6 @@ mod tests {
         .unwrap();
         assert_eq!(r.stop_reason, StopReason::ToolUse);
         assert_eq!(r.content.len(), 2);
+        assert_eq!(r.model.as_deref(), Some("claude-x"));
     }
 }

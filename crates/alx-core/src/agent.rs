@@ -53,6 +53,7 @@ impl SingleAgent {
         &self,
         session: &mut Session,
         events: &dyn EventSink,
+        model: &mut Option<String>,
     ) -> anyhow::Result<StopReason> {
         loop {
             events.emit(Event::ModelRequest);
@@ -65,6 +66,9 @@ impl SingleAgent {
                     max_tokens: self.config.max_tokens,
                 })
                 .await?;
+            if resp.model.is_some() {
+                model.clone_from(&resp.model);
+            }
             session.messages.push(Message {
                 role: Role::Assistant,
                 content: resp.content.clone(),
@@ -123,10 +127,12 @@ impl AgentLoop for SingleAgent {
         let checkpoint = session.messages.len();
         session.messages.push(input);
         events.emit(Event::TurnStarted);
-        match self.turn_inner(session, events).await {
+        let mut model = None;
+        match self.turn_inner(session, events, &mut model).await {
             Ok(stop_reason) => {
                 events.emit(Event::TurnFinished {
                     stop_reason: stop_reason.clone(),
+                    model,
                 });
                 Ok(stop_reason)
             }
@@ -165,6 +171,13 @@ mod tests {
 
     #[async_trait]
     impl Provider for ScriptedProvider {
+        fn info(&self) -> alx_protocol::ProviderInfo {
+            alx_protocol::ProviderInfo {
+                name: "scripted".into(),
+                model: None,
+            }
+        }
+
         async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
             self.seen.lock().unwrap().push(req);
             self.responses
@@ -232,10 +245,12 @@ mod tests {
                     },
                 ],
                 stop_reason: StopReason::ToolUse,
+                model: None,
             }),
             Ok(CompletionResponse {
                 content: vec![text("done")],
                 stop_reason: StopReason::EndTurn,
+                model: Some("m-2".into()),
             }),
         ]));
         let exec = Arc::new(FakeExecutor::default());
@@ -268,7 +283,8 @@ mod tests {
         assert_eq!(
             events.last(),
             Some(&Event::TurnFinished {
-                stop_reason: StopReason::EndTurn
+                stop_reason: StopReason::EndTurn,
+                model: Some("m-2".into()),
             })
         );
         assert!(events.contains(&Event::AssistantText {

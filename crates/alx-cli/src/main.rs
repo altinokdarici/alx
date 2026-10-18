@@ -33,6 +33,9 @@ impl EventSink for CliRenderer {
                     println!("{output}");
                 }
             }
+            Event::TurnFinished {
+                model: Some(model), ..
+            } => println!("[model: {model}]\n"),
             Event::TurnStarted | Event::TurnFinished { .. } => {}
         }
     }
@@ -64,6 +67,12 @@ fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<u8> {
     let agent = alx_core::agent_from_env()?;
+    let info = agent.provider.info();
+    println!(
+        "alx · provider: {} · model: {}\n",
+        info.name,
+        info.model.as_deref().unwrap_or("provider default")
+    );
     let store = InMemorySessionStore::default();
     let mut session = Session::new("cli");
     let mut lines = BufReader::new(tokio::io::stdin()).lines();

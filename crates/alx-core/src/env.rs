@@ -2,32 +2,58 @@
 //! than in a binary so every client is wired the same way.
 
 use crate::{
-    AgentConfig, AnthropicConfig, AnthropicProvider, BashTool, LocalExecutor, SingleAgent,
-    ToolContext, ToolRegistry,
+    AgentConfig, AnthropicConfig, AnthropicProvider, BashTool, LocalExecutor, Provider,
+    SingleAgent, ToolContext, ToolRegistry,
 };
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::sync::Arc;
 
-/// Default agent: Anthropic provider, bash tool, local executor.
+/// Default agent: the provider from [`provider_from_env`], bash tool, local
+/// executor.
 ///
-/// Reads `CLAUDE_API_KEY` (required) and `ALX_MODEL` (optional). Swap any
-/// part here: another `Provider`, `Executor` (Docker, remote, ...), more
-/// tools, or a different `AgentLoop` entirely.
+/// Swap any part here: another `Provider`, `Executor` (Docker, remote, ...),
+/// more tools, or a different `AgentLoop` entirely.
 pub fn agent_from_env() -> anyhow::Result<SingleAgent> {
-    let api_key = std::env::var("CLAUDE_API_KEY")
-        .context("CLAUDE_API_KEY environment variable is not set")?;
-    let mut provider_config = AnthropicConfig::new(api_key);
-    if let Ok(model) = std::env::var("ALX_MODEL") {
-        provider_config.model = model;
-    }
     Ok(SingleAgent {
         config: AgentConfig::default(),
-        provider: Arc::new(AnthropicProvider::new(provider_config)),
+        provider: provider_from_env()?,
         tools: ToolRegistry::new().with(BashTool),
         tool_ctx: ToolContext {
             executor: Arc::new(LocalExecutor),
         },
     })
+}
+
+/// The LLM backend named by `ALX_PROVIDER`:
+///
+/// - `anthropic` (default): the Anthropic API. Needs `CLAUDE_API_KEY`.
+/// - `copilot`: GitHub Copilot, through the `copilot` CLI and its login.
+///
+/// `ALX_MODEL` overrides the model for either.
+pub fn provider_from_env() -> anyhow::Result<Arc<dyn Provider>> {
+    let model = std::env::var("ALX_MODEL").ok();
+    let name = std::env::var("ALX_PROVIDER").unwrap_or_else(|_| "anthropic".into());
+    match name.as_str() {
+        "anthropic" => {
+            let api_key = std::env::var("CLAUDE_API_KEY")
+                .context("CLAUDE_API_KEY environment variable is not set")?;
+            let mut config = AnthropicConfig::new(api_key);
+            if let Some(model) = model {
+                config.model = model;
+            }
+            Ok(Arc::new(AnthropicProvider::new(config)))
+        }
+        #[cfg(feature = "copilot")]
+        "copilot" => Ok(Arc::new(crate::CopilotProvider::new(
+            crate::CopilotConfig {
+                model,
+                ..Default::default()
+            },
+        ))),
+        #[cfg(not(feature = "copilot"))]
+        "copilot" => bail!("alx was built without the `copilot` feature"),
+        other => bail!("unknown ALX_PROVIDER `{other}` (expected `anthropic` or `copilot`)"),
+    }
 }
 
 /// Minimal `.env` loader: `KEY=VALUE` lines from `./.env`, without

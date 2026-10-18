@@ -4,7 +4,7 @@
 //!
 //! | Layer          | Trait            | Built-in                       |
 //! |----------------|------------------|--------------------------------|
-//! | LLM backend    | [`Provider`]     | [`AnthropicProvider`]          |
+//! | LLM backend    | [`Provider`]     | [`AnthropicProvider`], `CopilotProvider` |
 //! | Tools          | [`Tool`]         | [`BashTool`]                   |
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
@@ -24,10 +24,12 @@ pub mod tool;
 pub mod tools;
 
 pub use agent::{AgentConfig, AgentLoop, SingleAgent};
-pub use env::{agent_from_env, load_dotenv};
+pub use env::{agent_from_env, load_dotenv, provider_from_env};
 pub use event::EventSink;
 pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};
 pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
+#[cfg(feature = "copilot")]
+pub use provider::copilot::{CopilotConfig, CopilotProvider};
 pub use provider::{CompletionRequest, CompletionResponse, Provider};
 pub use session::{InMemorySessionStore, Session, SessionStore};
 pub use tool::{Tool, ToolContext, ToolOutput, ToolRegistry};

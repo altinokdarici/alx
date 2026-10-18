@@ -1,0 +1,4 @@
+[env]
+# github-copilot-sdk's build script otherwise downloads the Copilot CLI.
+# alx runs the user's installed `copilot` instead (see CopilotConfig).
+COPILOT_SKIP_CLI_DOWNLOAD = "1"

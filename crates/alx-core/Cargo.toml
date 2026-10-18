@@ -13,3 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+github-copilot-sdk = { workspace = true, optional = true }
+
+[features]
+default = ["copilot"]
+# GitHub Copilot as a provider (via the Copilot SDK and the `copilot` CLI).
+copilot = ["dep:github-copilot-sdk"]
