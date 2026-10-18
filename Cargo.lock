@@ -3,14 +3,11 @@
 version = 4
 
 [[package]]
-name = "alx"
+name = "alx-cli"
 version = "0.1.0"
 dependencies = [
  "alx-core",
- "alx-protocol",
  "anyhow",
- "async-trait",
- "serde_json",
  "tokio",
 ]
 
@@ -33,6 +30,18 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "alxd"
+version = "0.1.0"
+dependencies = [
+ "alx-core",
+ "alx-protocol",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

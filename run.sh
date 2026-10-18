@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 if [[ $# -gt 0 ]]; then
-	printf '%s\nexit\n' "$*" | cargo run --quiet
+	printf '%s\nexit\n' "$*" | cargo run --quiet --bin alx
 else
-	exec cargo run --quiet
+	exec cargo run --quiet --bin alx
 fi

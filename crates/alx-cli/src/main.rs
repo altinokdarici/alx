@@ -1,38 +1,14 @@
 //! alx dev CLI: a line-based REPL.
 //!
-//! This is just one client of the core. It wires the pluggable parts together
-//! in `build_agent` and renders core events in `CliRenderer`.
+//! This is just one client of the core. The agent itself is wired up in
+//! `alx_core::agent_from_env`; this crate only reads input and renders core
+//! events in `CliRenderer`. Headless use is `alxd`.
 
 use alx_core::protocol::{Event, Message, StopReason};
-use alx_core::{
-    AgentConfig, AgentLoop, AnthropicConfig, AnthropicProvider, BashTool, EventSink,
-    InMemorySessionStore, LocalExecutor, Session, SessionStore, SingleAgent, ToolContext,
-    ToolRegistry,
-};
-use anyhow::Context;
+use alx_core::{AgentLoop, EventSink, InMemorySessionStore, Session, SessionStore};
 use std::io::Write;
 use std::process::ExitCode;
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-
-/// Swap any part here: another `Provider`, `Executor` (Docker, remote, ...),
-/// more tools, or a different `AgentLoop` entirely.
-fn build_agent() -> anyhow::Result<impl AgentLoop> {
-    let api_key = std::env::var("CLAUDE_API_KEY")
-        .context("CLAUDE_API_KEY environment variable is not set")?;
-    let mut provider_config = AnthropicConfig::new(api_key);
-    if let Ok(model) = std::env::var("ALX_MODEL") {
-        provider_config.model = model;
-    }
-    Ok(SingleAgent {
-        config: AgentConfig::default(),
-        provider: Arc::new(AnthropicProvider::new(provider_config)),
-        tools: ToolRegistry::new().with(BashTool),
-        tool_ctx: ToolContext {
-            executor: Arc::new(LocalExecutor),
-        },
-    })
-}
 
 /// Plain stdout/stderr rendering of core events.
 struct CliRenderer;
@@ -74,30 +50,8 @@ fn exit_code_for(reason: &StopReason) -> u8 {
     }
 }
 
-/// Minimal `.env` loader: `KEY=VALUE` lines, without overriding variables
-/// that are already set.
-fn load_dotenv() {
-    let Ok(contents) = std::fs::read_to_string(".env") else {
-        return;
-    };
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().trim_start_matches("export ").trim();
-            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-            if std::env::var_os(key).is_none() {
-                // SAFETY: called at startup before any other threads exist.
-                unsafe { std::env::set_var(key, value) };
-            }
-        }
-    }
-}
-
 fn main() -> ExitCode {
-    load_dotenv();
+    alx_core::load_dotenv();
     let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
     match runtime.block_on(run()) {
         Ok(code) => ExitCode::from(code),
@@ -109,7 +63,7 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> anyhow::Result<u8> {
-    let agent = build_agent()?;
+    let agent = alx_core::agent_from_env()?;
     let store = InMemorySessionStore::default();
     let mut session = Session::new("cli");
     let mut lines = BufReader::new(tokio::io::stdin()).lines();

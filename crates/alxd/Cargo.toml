@@ -1,0 +1,14 @@
+[package]
+name = "alxd"
+description = "alx headless agent: JSON lines over stdin/stdout, no UI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alx-protocol.workspace = true
+alx-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

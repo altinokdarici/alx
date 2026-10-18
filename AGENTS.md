@@ -18,7 +18,7 @@ history if you need it as a reference.
   | Where commands run | `Executor` | `LocalExecutor` (Docker/remote later) |
   | Agent loop   | `AgentLoop`    | `SingleAgent` (multi-agent later) |
   | Persistence  | `SessionStore` | `InMemorySessionStore` |
-  | UI           | `EventSink`    | `CliRenderer` in the `alx` bin |
+  | UI           | `EventSink`    | `CliRenderer` (`alx-cli`), `JsonLines` (`alxd`) |
 
 - Tools get the executor through `ToolContext` and never own one, so
   swapping the executor moves every tool with it.
@@ -29,13 +29,19 @@ history if you need it as a reference.
 ## Layout
 
 - `crates/alx-protocol`: wire types shared by core and clients (messages, tool specs, events)
-- `crates/alx-core`: agent loop, traits, built-in implementations
-- `crates/alx`: binary (dev CLI REPL now, headless server later)
+- `crates/alx-core`: agent loop, traits, built-in implementations, and
+  `agent_from_env` / `load_dotenv`, the shared wiring used by every binary
+- `crates/alx-cli`: the `alx` binary, an interactive line-based REPL
+- `crates/alxd`: the headless agent. JSON lines over stdio for now: requests
+  `{"text": "..."}` on stdin, `alx-protocol` events on stdout. The long-term
+  transport is still open.
+- Both binaries call `alx-core` directly, in-process.
 
 ## Working on it
 
 - `cargo test` must pass. Core logic is tested with fake `Provider`/`Executor`
   implementations, with no network needed.
 - `cargo clippy --all-targets` and `cargo fmt` must both be clean.
-- `cargo run` starts the REPL. It reads `CLAUDE_API_KEY` (from the environment or
+- `./run.sh` or `cargo run --bin alx` starts the REPL; `cargo run --bin alxd`
+  runs headless. Both read `CLAUDE_API_KEY` (from the environment or
   `.env`); `ALX_MODEL` overrides the model.

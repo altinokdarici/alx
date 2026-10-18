@@ -9,12 +9,13 @@
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
 //! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`]       |
-//! | UI / output    | [`EventSink`]    | any client (see the `alx` bin) |
+//! | UI / output    | [`EventSink`]    | any client (`alx-cli`, `alxd`) |
 //!
 //! The core never prints. It reports progress through an [`EventSink`], so
 //! any UI can be plugged in on top.
 
 pub mod agent;
+pub mod env;
 pub mod event;
 pub mod executor;
 pub mod provider;
@@ -23,6 +24,7 @@ pub mod tool;
 pub mod tools;
 
 pub use agent::{AgentConfig, AgentLoop, SingleAgent};
+pub use env::{agent_from_env, load_dotenv};
 pub use event::EventSink;
 pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};
 pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
