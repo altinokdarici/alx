@@ -1,8 +1,8 @@
 # alx
 
-A headless coding agent harness, written in Rust. The original prototype,
-`agent.ts`, is being migrated piece by piece into the Rust workspace and
-stays in the repo as the reference until the migration is done.
+A headless coding agent harness, written in Rust. It started as a
+TypeScript prototype (`agent.ts`), which has since been removed; see git
+history if you need it as a reference.
 
 ## Principles
 
@@ -31,7 +31,6 @@ stays in the repo as the reference until the migration is done.
 - `crates/alx-protocol`: wire types shared by core and clients (messages, tool specs, events)
 - `crates/alx-core`: agent loop, traits, built-in implementations
 - `crates/alx`: binary (dev CLI REPL now, headless server later)
-- `agent.ts`: original TypeScript prototype (reference during migration)
 
 ## Working on it
 
