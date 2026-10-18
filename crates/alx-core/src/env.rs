@@ -1,5 +1,5 @@
-//! Building an agent from the process environment. Shared by every binary
-//! (the `alx` CLI and the headless `alxd`) so they are wired identically.
+//! Building an agent from the process environment. Kept in the core rather
+//! than in a binary so every client is wired the same way.
 
 use crate::{
     AgentConfig, AnthropicConfig, AnthropicProvider, BashTool, LocalExecutor, SingleAgent,

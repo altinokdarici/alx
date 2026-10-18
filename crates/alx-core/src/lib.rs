@@ -9,7 +9,7 @@
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
 //! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`]       |
-//! | UI / output    | [`EventSink`]    | any client (`alx-cli`, `alxd`) |
+//! | UI / output    | [`EventSink`]    | any client (see `alx-cli`)     |
 //!
 //! The core never prints. It reports progress through an [`EventSink`], so
 //! any UI can be plugged in on top.

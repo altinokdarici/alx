@@ -33,18 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alxd"
-version = "0.1.0"
-dependencies = [
- "alx-core",
- "alx-protocol",
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"

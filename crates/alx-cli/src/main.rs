@@ -2,7 +2,7 @@
 //!
 //! This is just one client of the core. The agent itself is wired up in
 //! `alx_core::agent_from_env`; this crate only reads input and renders core
-//! events in `CliRenderer`. Headless use is `alxd`.
+//! events in `CliRenderer`.
 
 use alx_core::protocol::{Event, Message, StopReason};
 use alx_core::{AgentLoop, EventSink, InMemorySessionStore, Session, SessionStore};
