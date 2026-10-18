@@ -20,11 +20,12 @@ pub mod event;
 pub mod executor;
 pub mod provider;
 pub mod session;
+pub mod settings;
 pub mod tool;
 pub mod tools;
 
 pub use agent::{AgentConfig, AgentLoop, SingleAgent};
-pub use env::{agent_from_env, load_dotenv, provider_from_env};
+pub use env::{agent_from_settings, load_dotenv, provider_from_settings};
 pub use event::EventSink;
 pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};
 pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
@@ -32,6 +33,7 @@ pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
 pub use provider::copilot::{CopilotConfig, CopilotProvider};
 pub use provider::{CompletionRequest, CompletionResponse, Provider};
 pub use session::{InMemorySessionStore, Session, SessionStore};
+pub use settings::{AnthropicSettings, CopilotSettings, ProviderKind, Settings};
 pub use tool::{Tool, ToolContext, ToolOutput, ToolRegistry};
 pub use tools::bash::BashTool;
 

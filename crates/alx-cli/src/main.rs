@@ -1,14 +1,33 @@
 //! alx dev CLI: a line-based REPL.
 //!
 //! This is just one client of the core. The agent itself is wired up in
-//! `alx_core::agent_from_env`; this crate only reads input and renders core
+//! `alx_core::agent_from_settings`; this crate only reads input and renders core
 //! events in `CliRenderer`.
 
 use alx_core::protocol::{Event, Message, StopReason};
-use alx_core::{AgentLoop, EventSink, InMemorySessionStore, Session, SessionStore};
+use alx_core::{
+    AgentLoop, EventSink, InMemorySessionStore, ProviderKind, Session, SessionStore, Settings,
+};
+use clap::Parser;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Command-line flags: the highest-precedence settings layer.
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    /// LLM backend: `anthropic` or `copilot`.
+    #[arg(long)]
+    provider: Option<ProviderKind>,
+    /// Model id for the selected provider.
+    #[arg(long)]
+    model: Option<String>,
+    /// Use this config file instead of `./alx.toml`.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
 
 /// Plain stdout/stderr rendering of core events.
 struct CliRenderer;
@@ -66,7 +85,13 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> anyhow::Result<u8> {
-    let agent = alx_core::agent_from_env()?;
+    let cli = Cli::parse();
+    let settings = Settings::load(cli.config.as_deref())?.merge(Settings {
+        provider: cli.provider,
+        model: cli.model,
+        ..Default::default()
+    });
+    let agent = alx_core::agent_from_settings(&settings)?;
     let info = agent.provider.info();
     println!(
         "alx · provider: {} · model: {}\n",

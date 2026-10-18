@@ -52,9 +52,16 @@ history if you need it as a reference.
   `cargo clippy --all-targets -D warnings`. `cargo-husky` installs it
   automatically on the first `cargo test`. CI (`.github/workflows/ci.yml`)
   runs the same checks plus `cargo test`.
-- `./run.sh` starts the REPL, always with the Copilot provider. `cargo run`
-  starts it with whatever the environment or `.env` selects:
-  - `ALX_PROVIDER`: `anthropic` (default, needs `CLAUDE_API_KEY`) or
-    `copilot` (needs the `copilot` CLI, logged in; `COPILOT_CLI_PATH` and
-    `COPILOT_HOME` override where it is and where its state lives).
-  - `ALX_MODEL` overrides the model for either provider.
+- `./run.sh` starts the REPL with `--provider copilot`; `cargo run` starts it
+  with whatever the settings select.
+- Settings (`alx-core/src/settings.rs`) are layered, each overriding the one
+  before: user file (`~/.config/alx/config.toml`) -> project file (`./alx.toml`,
+  or `--config`) -> env vars -> CLI flags. Files are TOML; unknown keys are errors.
+  - `provider` (`anthropic` default | `copilot`), `model`, `[anthropic] base_url`,
+    `[copilot] cli_path`, `home`.
+  - Env: `ALX_PROVIDER`, `ALX_MODEL`, `ALX_ANTHROPIC_BASE_URL`, `COPILOT_CLI_PATH`,
+    `COPILOT_HOME`. Flags: `--provider`, `--model`, `--config`.
+  - `CLAUDE_API_KEY` (env or `.env`) is the only way to give the Anthropic key;
+    it is rejected in files.
+  - A new setting means: a field in `Settings`, its `merge` line, its env var in
+    `from_env_with`, and a flag if it is worth one.
