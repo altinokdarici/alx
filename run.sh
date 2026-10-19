@@ -15,5 +15,5 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 if [[ $# -gt 0 ]]; then
 	printf '%s\nexit\n' "$*" | cargo run --quiet --bin alx
 else
-	exec cargo run --quiet --bin alx -- --provider copilot
+	exec cargo run --quiet --bin alx -- --provider copilot --continue
 fi

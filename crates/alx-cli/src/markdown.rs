@@ -358,25 +358,47 @@ impl<'a> Renderer<'a> {
 
     fn table_out(&mut self, t: &Table) {
         let cols = t.rows.iter().map(Vec::len).max().unwrap_or(0);
-        let mut widths = vec![0; cols];
+        if cols == 0 {
+            return;
+        }
+        let mut widths = vec![1; cols];
         for row in &t.rows {
             for (w, cell) in widths.iter_mut().zip(row) {
                 *w = (*w).max(visible_width(cell));
             }
         }
+        // Shrink the widest columns until the table fits the line.
+        let prefix_w: usize = self.containers.iter().map(|c| c.cont.chars().count()).sum();
+        let avail = self.width.saturating_sub(prefix_w);
+        let seps = 3 * (cols - 1);
+        let min_col = 6;
+        while widths.iter().sum::<usize>() + seps > avail {
+            let (i, &w) = widths.iter().enumerate().max_by_key(|(_, w)| **w).unwrap();
+            if w <= min_col {
+                break;
+            }
+            widths[i] = w - 1;
+        }
+        let sep = self.style.paint("2", " │ ");
         for (i, row) in t.rows.iter().enumerate() {
-            let cells: Vec<String> = (0..cols)
-                .map(|c| {
-                    let cell = row.get(c).map_or("", String::as_str);
-                    let pad = " ".repeat(widths[c] - visible_width(cell));
-                    if i < t.header_rows {
-                        format!("{}{pad}", self.style.paint("1", cell))
-                    } else {
-                        format!("{cell}{pad}")
-                    }
-                })
+            let wrapped: Vec<Vec<String>> = (0..cols)
+                .map(|c| wrap_ansi(row.get(c).map_or("", String::as_str), widths[c]))
                 .collect();
-            self.table_line(&cells.join(&self.style.paint("2", " │ ")));
+            let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+            for l in 0..height {
+                let cells: Vec<String> = (0..cols)
+                    .map(|c| {
+                        let cell = wrapped[c].get(l).map_or("", String::as_str);
+                        let pad = " ".repeat(widths[c].saturating_sub(visible_width(cell)));
+                        if i < t.header_rows {
+                            format!("{}{pad}", self.style.paint("1", cell))
+                        } else {
+                            format!("{cell}{pad}")
+                        }
+                    })
+                    .collect();
+                self.table_line(cells.join(&sep).trim_end());
+            }
             if i + 1 == t.header_rows {
                 let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
                 self.table_line(&self.style.paint("2", &rule.join("─┼─")));
@@ -392,6 +414,72 @@ impl<'a> Renderer<'a> {
         self.last_line_blank = false;
         self.suppress_blank = false;
     }
+}
+
+/// Word-wraps `s` to `width` visible columns, keeping ANSI styling intact
+/// across the breaks. Words longer than `width` are split.
+fn wrap_ansi(s: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0;
+    let mut active = String::new(); // SGR sequences in effect
+    for word in s.split(' ') {
+        // Split the word into pieces that each fit on a line.
+        let mut piece = String::new();
+        let mut piece_w = 0;
+        let mut pieces = Vec::new();
+        let mut chars = word.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                let mut seq = String::from(c);
+                for n in chars.by_ref() {
+                    seq.push(n);
+                    if n == 'm' {
+                        break;
+                    }
+                }
+                piece.push_str(&seq);
+                continue;
+            }
+            if piece_w == width {
+                pieces.push(std::mem::take(&mut piece));
+                piece_w = 0;
+            }
+            piece.push(c);
+            piece_w += 1;
+        }
+        pieces.push(piece);
+        for p in pieces {
+            let w = visible_width(&p);
+            if line_w > 0 && line_w + 1 + w > width {
+                if !active.is_empty() {
+                    line.push_str("\x1b[0m");
+                }
+                lines.push(std::mem::take(&mut line));
+                line.push_str(&active);
+                line_w = 0;
+            }
+            if line_w > 0 {
+                line.push(' ');
+                line_w += 1;
+            }
+            line.push_str(&p);
+            line_w += w;
+            // Track which styles are on at the end of this piece.
+            let mut rest = p.as_str();
+            while let Some(at) = rest.find('\x1b') {
+                let end = rest[at..].find('m').map_or(rest.len(), |e| at + e + 1);
+                if &rest[at..end] == "\x1b[0m" {
+                    active.clear();
+                } else {
+                    active.push_str(&rest[at..end]);
+                }
+                rest = &rest[end..];
+            }
+        }
+    }
+    lines.push(line);
+    lines
 }
 
 /// Width of `s` on screen: its characters, without ANSI escape sequences.
@@ -520,7 +608,7 @@ mod tests {
         let md = "| Name | Age |\n|---|---|\n| Bob | 3 |\n| Alexandra | 41 |";
         assert_eq!(
             plain(md),
-            "Name      │ Age\n──────────┼────\nBob       │ 3  \nAlexandra │ 41"
+            "Name      │ Age\n──────────┼────\nBob       │ 3\nAlexandra │ 41"
         );
     }
 
@@ -535,5 +623,20 @@ mod tests {
     fn html_and_empty_input_do_not_panic() {
         assert_eq!(plain(""), "");
         assert_eq!(plain("<b>x</b>"), "<b>x</b>");
+    }
+
+    #[test]
+    fn wide_tables_shrink_and_wrap_to_the_width() {
+        let md = "| Name | Description |\n|---|---|\n| a | one two three four five six seven eight nine ten |";
+        let s = render(md, &PLAIN, 30);
+        assert!(s.lines().all(|l| visible_width(l) <= 30), "{s}");
+        assert!(s.contains("seven"), "{s}");
+        assert!(s.lines().count() > 4, "cell should wrap:\n{s}");
+    }
+
+    #[test]
+    fn wrapped_styles_continue_on_the_next_line() {
+        let lines = wrap_ansi("\x1b[1maaa bbb ccc\x1b[0m", 7);
+        assert_eq!(lines, ["\x1b[1maaa bbb\x1b[0m", "\x1b[1mccc\x1b[0m"]);
     }
 }

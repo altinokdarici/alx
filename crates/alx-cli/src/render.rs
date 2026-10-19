@@ -97,10 +97,11 @@ fn clip(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// The terminal width: the real size when stdout is a terminal, else `COLUMNS`, else 100.
 fn width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse().ok())
+    terminal_size::terminal_size()
+        .map(|(w, _)| usize::from(w.0))
+        .or_else(|| std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()))
         .filter(|&c| c >= 40)
         .unwrap_or(100)
 }
@@ -172,7 +173,7 @@ impl Renderer {
             }
             Event::ModelRequest | Event::TurnStarted => None,
             Event::AssistantText { text } => {
-                let text = crate::markdown::render(text.trim(), style, width());
+                let text = crate::markdown::render(text.trim(), style, width().saturating_sub(2));
                 let text = indent(&text, "  ");
                 let text = text.strip_prefix("  ").unwrap_or(&text);
                 Some(format!("\n{} {text}\n", style.cyan_bold("●")))

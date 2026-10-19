@@ -15,4 +15,5 @@ anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+terminal_size = "0.4"
 pulldown-cmark = { version = "0.13", default-features = false }
