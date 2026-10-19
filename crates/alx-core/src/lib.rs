@@ -8,7 +8,7 @@
 //! | Tools          | [`Tool`]         | [`BashTool`]                   |
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
-//! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`]       |
+//! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`], [`FileSessionStore`] |
 //! | UI / output    | [`EventSink`]    | any client (see `alx-cli`)     |
 //!
 //! The core never prints. It reports progress through an [`EventSink`], so
@@ -32,7 +32,10 @@ pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
 #[cfg(feature = "copilot")]
 pub use provider::copilot::{CopilotConfig, CopilotProvider};
 pub use provider::{CompletionRequest, CompletionResponse, Provider};
-pub use session::{InMemorySessionStore, Session, SessionStore};
+pub use session::{
+    FileSessionStore, InMemorySessionStore, Session, SessionStore, SessionSummary,
+    default_session_dir,
+};
 pub use settings::{AnthropicSettings, CopilotSettings, ProviderKind, Settings};
 pub use tool::{Tool, ToolContext, ToolOutput, ToolRegistry};
 pub use tools::bash::BashTool;

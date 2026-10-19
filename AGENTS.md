@@ -17,7 +17,7 @@ history if you need it as a reference.
   | Tools        | `Tool`         | `BashTool`             |
   | Where commands run | `Executor` | `LocalExecutor` (Docker/remote later) |
   | Agent loop   | `AgentLoop`    | `SingleAgent` (multi-agent later) |
-  | Persistence  | `SessionStore` | `InMemorySessionStore` |
+  | Persistence  | `SessionStore` | `FileSessionStore`, `InMemorySessionStore` |
   | UI           | `EventSink`    | `CliRenderer` (`alx-cli`) |
 
 - Tools get the executor through `ToolContext` and never own one, so
@@ -34,6 +34,12 @@ history if you need it as a reference.
   off in `.cargo/config.toml`.
 - `./AGENTS.md` in the working directory, if present, is appended to the system
   prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
+- Sessions are saved after every turn by `FileSessionStore` (one JSONL file per
+  session: a header line, then one message per line) in `session_dir`
+  (default `~/.local/share/alx/sessions`). `alx --continue` resumes the latest
+  session started in the current directory, `--resume <id>` a specific one,
+  `--list-sessions` lists them. Copilot keeps provider-side state that is not
+  restored on resume; only the message history is.
 - v1 scope: single agent, local execution, no MCP.
 
 ## Layout
@@ -63,10 +69,10 @@ history if you need it as a reference.
 - Settings (`alx-core/src/settings.rs`) are layered, each overriding the one
   before: user file (`~/.config/alx/config.toml`) -> project file (`./alx.toml`,
   or `--config`) -> env vars -> CLI flags. Files are TOML; unknown keys are errors.
-  - `provider` (`anthropic` default | `copilot`), `model`, `[anthropic] base_url`,
+  - `provider` (`anthropic` default | `copilot`), `model`, `session_dir`, `[anthropic] base_url`,
     `[copilot] cli_path`, `home`.
-  - Env: `ALX_PROVIDER`, `ALX_MODEL`, `ALX_ANTHROPIC_BASE_URL`, `COPILOT_CLI_PATH`,
-    `COPILOT_HOME`. Flags: `--provider`, `--model`, `--config`.
+  - Env: `ALX_PROVIDER`, `ALX_MODEL`, `ALX_SESSION_DIR`, `ALX_ANTHROPIC_BASE_URL`, `COPILOT_CLI_PATH`,
+    `COPILOT_HOME`. Flags: `--provider`, `--model`, `--config`, `--session-dir`.
   - `CLAUDE_API_KEY` (env or `.env`) is the only way to give the Anthropic key;
     it is rejected in files.
   - A new setting means: a field in `Settings`, its `merge` line, its env var in

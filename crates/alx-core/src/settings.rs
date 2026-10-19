@@ -53,6 +53,8 @@ pub struct Settings {
     pub provider: Option<ProviderKind>,
     /// Model id, for whichever provider is selected.
     pub model: Option<String>,
+    /// Where sessions are stored. Defaults to `~/.local/share/alx/sessions`.
+    pub session_dir: Option<PathBuf>,
     #[serde(default)]
     pub anthropic: AnthropicSettings,
     #[serde(default)]
@@ -132,6 +134,7 @@ impl Settings {
     /// |--------------------------|----------------------|
     /// | `ALX_PROVIDER`           | `provider`           |
     /// | `ALX_MODEL`              | `model`              |
+    /// | `ALX_SESSION_DIR`        | `session_dir`        |
     /// | `ALX_ANTHROPIC_BASE_URL` | `anthropic.base_url` |
     /// | `CLAUDE_API_KEY`         | `anthropic.api_key`  |
     /// | `COPILOT_CLI_PATH`       | `copilot.cli_path`   |
@@ -143,6 +146,7 @@ impl Settings {
         Self {
             provider: get("ALX_PROVIDER").and_then(|v| v.parse().ok()),
             model: get("ALX_MODEL"),
+            session_dir: get("ALX_SESSION_DIR").map(PathBuf::from),
             anthropic: AnthropicSettings {
                 base_url: get("ALX_ANTHROPIC_BASE_URL"),
                 api_key: get("CLAUDE_API_KEY"),
@@ -160,6 +164,7 @@ impl Settings {
         Self {
             provider: other.provider.or(self.provider),
             model: other.model.or(self.model),
+            session_dir: other.session_dir.or(self.session_dir),
             anthropic: AnthropicSettings {
                 base_url: other.anthropic.base_url.or(self.anthropic.base_url),
                 api_key: other.anthropic.api_key.or(self.anthropic.api_key),
@@ -169,6 +174,14 @@ impl Settings {
                 home: other.copilot.home.or(self.copilot.home),
             },
         }
+    }
+
+    /// The directory sessions are stored in, with the default applied.
+    pub fn session_dir(&self) -> anyhow::Result<PathBuf> {
+        self.session_dir
+            .clone()
+            .or_else(crate::session::default_session_dir)
+            .context("cannot locate a session directory: set `session_dir` or HOME")
     }
 
     /// The provider to use, with the default applied.
@@ -228,11 +241,13 @@ mod tests {
     fn env_layer_maps_variables() {
         let s = Settings::from_env_with(|k| match k {
             "ALX_MODEL" => Some("m".into()),
+            "ALX_SESSION_DIR" => Some("/s".into()),
             "CLAUDE_API_KEY" => Some("key".into()),
             "COPILOT_HOME" => Some("/c".into()),
             _ => None,
         });
         assert_eq!(s.model.as_deref(), Some("m"));
+        assert_eq!(s.session_dir, Some("/s".into()));
         assert_eq!(s.anthropic.api_key.as_deref(), Some("key"));
         assert_eq!(s.copilot.home, Some("/c".into()));
         assert_eq!(s.provider_kind(), ProviderKind::Anthropic);
