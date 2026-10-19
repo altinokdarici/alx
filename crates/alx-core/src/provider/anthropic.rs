@@ -175,7 +175,9 @@ impl StreamAccumulator {
         }
     }
 
-    fn event(&mut self, ev: &Value) -> anyhow::Result<()> {
+    /// Applies one event; returns the text it added, if it was a text delta.
+    fn event(&mut self, ev: &Value) -> anyhow::Result<Option<String>> {
+        let mut added = None;
         let index = ev.get("index").and_then(Value::as_u64).unwrap_or(0);
         match ev.get("type").and_then(Value::as_str) {
             Some("message_start") => {
@@ -210,7 +212,9 @@ impl StreamAccumulator {
                     d.get("type").and_then(Value::as_str),
                 ) {
                     (Some(Partial::Text(t)), Some("text_delta")) => {
-                        t.push_str(d["text"].as_str().unwrap_or_default());
+                        let text = d["text"].as_str().unwrap_or_default();
+                        t.push_str(text);
+                        added = Some(text.to_owned());
                     }
                     (Some(Partial::ToolUse { json, .. }), Some("input_json_delta")) => {
                         json.push_str(d["partial_json"].as_str().unwrap_or_default());
@@ -230,7 +234,7 @@ impl StreamAccumulator {
             // ping, content_block_stop, message_stop, unknown future events.
             _ => {}
         }
-        Ok(())
+        Ok(added)
     }
 
     fn finish(self) -> anyhow::Result<CompletionResponse> {
@@ -283,6 +287,14 @@ impl Provider for AnthropicProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        self.complete_streaming(req, &|_| {}).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        on_text: &(dyn for<'a> Fn(&'a str) + Send + Sync),
+    ) -> anyhow::Result<CompletionResponse> {
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let resp = self
             .http
@@ -306,7 +318,11 @@ impl Provider for AnthropicProvider {
         while let Some(chunk) = resp.chunk().await.context("LLM stream was interrupted")? {
             for data in sse.push(&chunk) {
                 let ev: Value = serde_json::from_str(&data).context("bad event in LLM stream")?;
-                acc.event(&ev)?;
+                if let Some(text) = acc.event(&ev)?
+                    && !text.is_empty()
+                {
+                    on_text(&text);
+                }
             }
         }
         acc.finish()
@@ -412,6 +428,17 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn text_deltas_are_reported_as_they_arrive() {
+        let mut sse = SseParser::default();
+        let mut acc = StreamAccumulator::default();
+        let mut seen = Vec::new();
+        for data in sse.push(sample_stream().as_bytes()) {
+            seen.extend(acc.event(&serde_json::from_str(&data).unwrap()).unwrap());
+        }
+        assert_eq!(seen, ["run", "ning é"]);
     }
 
     #[test]

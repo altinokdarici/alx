@@ -66,12 +66,16 @@ impl SingleAgent {
     ) -> anyhow::Result<StopReason> {
         loop {
             events.emit(Event::ModelRequest);
-            let request = self.provider.complete(CompletionRequest {
-                system: self.config.system_prompt.clone(),
-                messages: session.messages.clone(),
-                tools: self.tools.specs(),
-                max_tokens: self.config.max_tokens,
-            });
+            let on_text = |text: &str| events.emit(Event::AssistantTextDelta { text: text.into() });
+            let request = self.provider.complete_streaming(
+                CompletionRequest {
+                    system: self.config.system_prompt.clone(),
+                    messages: session.messages.clone(),
+                    tools: self.tools.specs(),
+                    max_tokens: self.config.max_tokens,
+                },
+                &on_text,
+            );
             let resp = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Ok(mark_cancelled(session)),
@@ -485,6 +489,67 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Reports its text in two pieces before returning it whole.
+    struct StreamingProvider;
+
+    #[async_trait]
+    impl Provider for StreamingProvider {
+        fn info(&self) -> alx_protocol::ProviderInfo {
+            alx_protocol::ProviderInfo {
+                name: "streaming".into(),
+                model: None,
+            }
+        }
+
+        async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+            self.complete_streaming(req, &|_| {}).await
+        }
+
+        async fn complete_streaming(
+            &self,
+            _req: CompletionRequest,
+            on_text: &(dyn for<'a> Fn(&'a str) + Send + Sync),
+        ) -> anyhow::Result<CompletionResponse> {
+            on_text("hel");
+            on_text("lo");
+            Ok(CompletionResponse {
+                content: vec![text("hello")],
+                stop_reason: StopReason::EndTurn,
+                model: None,
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_text_becomes_delta_events_before_the_whole_text() {
+        let agent = agent(
+            Arc::new(StreamingProvider),
+            Arc::new(FakeExecutor::default()),
+        );
+        let sink = VecSink::default();
+        let mut session = Session::new("s");
+        agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &sink,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        let kinds: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::AssistantTextDelta { text } => Some(format!("delta:{text}")),
+                Event::AssistantText { text } => Some(format!("text:{text}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["delta:hel", "delta:lo", "text:hello"]);
     }
 
     #[tokio::test]

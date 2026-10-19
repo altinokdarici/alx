@@ -32,4 +32,16 @@ pub trait Provider: Send + Sync {
     fn info(&self) -> ProviderInfo;
 
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse>;
+
+    /// Like [`complete`](Self::complete), but calls `on_text` with each piece
+    /// of text as the model writes it. The returned response is the same
+    /// whole one. Providers that can't stream just don't call `on_text`.
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        on_text: &(dyn for<'a> Fn(&'a str) + Send + Sync),
+    ) -> anyhow::Result<CompletionResponse> {
+        let _ = on_text;
+        self.complete(req).await
+    }
 }

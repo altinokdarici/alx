@@ -20,6 +20,113 @@ pub fn render(md: &str, style: &Style, width: usize) -> String {
     r.out.trim_end().to_owned()
 }
 
+/// Cuts streamed Markdown into blocks that can each be rendered on their own
+/// (paragraphs, lists, quotes, tables, fenced code), as soon as they are
+/// complete. Only whole lines are looked at, so a half-written `**` or table
+/// row is never rendered early.
+///
+/// Blocks end at a blank line, except that a fenced code block runs to its
+/// closing fence, and a list carries on over blank lines when the next line
+/// is indented or another item (a "loose" list).
+#[derive(Default)]
+pub struct BlockSplitter {
+    /// Text not yet seen a newline for.
+    partial: String,
+    block: String,
+    fence: Option<String>,
+    /// Blank lines after a list, held until we know whether it continues.
+    held: String,
+    awaiting: bool,
+}
+
+fn is_list_item(line: &str) -> bool {
+    let t = line.trim_start();
+    if ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m)) {
+        return true;
+    }
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && t[digits..].starts_with(['.', ')']) && t[digits + 1..].starts_with(' ')
+}
+
+fn fence_marker(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let n = t.chars().take_while(|&x| x == c).count();
+    (n >= 3).then(|| c.to_string().repeat(n))
+}
+
+impl BlockSplitter {
+    /// Adds streamed text; returns the blocks it completed.
+    pub fn push(&mut self, text: &str) -> Vec<String> {
+        self.partial.push_str(text);
+        let mut out = Vec::new();
+        while let Some(nl) = self.partial.find('\n') {
+            let line: String = self.partial.drain(..=nl).collect();
+            self.line(&line, &mut out);
+        }
+        out
+    }
+
+    /// The end of the text: returns whatever is left, however incomplete.
+    pub fn finish(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.partial.is_empty() {
+            let line = std::mem::take(&mut self.partial) + "\n";
+            self.line(&line, &mut out);
+        }
+        self.emit(&mut out);
+        out
+    }
+
+    fn emit(&mut self, out: &mut Vec<String>) {
+        let block = std::mem::take(&mut self.block);
+        self.held.clear();
+        self.awaiting = false;
+        self.fence = None;
+        if !block.trim().is_empty() {
+            out.push(block);
+        }
+    }
+
+    fn line(&mut self, line: &str, out: &mut Vec<String>) {
+        let text = line.trim_end_matches(['\n', '\r']);
+        if let Some(marker) = &self.fence {
+            self.block.push_str(line);
+            if text.trim_start().starts_with(marker.as_str()) {
+                self.emit(out);
+            }
+            return;
+        }
+        if self.awaiting {
+            if text.trim().is_empty() {
+                self.held.push_str(line);
+                return;
+            }
+            if text.starts_with([' ', '\t']) || is_list_item(text) {
+                let held = std::mem::take(&mut self.held);
+                self.block.push_str(&held);
+                self.awaiting = false;
+            } else {
+                self.emit(out);
+            }
+        }
+        if text.trim().is_empty() {
+            let is_list = self.block.lines().next().is_some_and(is_list_item);
+            if is_list {
+                self.awaiting = true;
+                self.held.push_str(line);
+            } else {
+                self.emit(out);
+            }
+            return;
+        }
+        self.block.push_str(line);
+        if let Some(marker) = fence_marker(text) {
+            self.fence = Some(marker);
+        }
+    }
+}
+
 /// A block that prefixes every line it contains: a list item or a quote.
 struct Container {
     /// Prefix for continuation lines.
@@ -725,5 +832,55 @@ mod tests {
     fn long_words_are_not_split() {
         let s = render("x https://example.com/a/very/long/url y", &PLAIN, 10);
         assert_eq!(s, "x\nhttps://example.com/a/very/long/url\ny");
+    }
+
+    fn split(chunks: &[&str]) -> Vec<String> {
+        let mut sp = BlockSplitter::default();
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend(sp.push(c));
+        }
+        out.extend(sp.finish());
+        out
+    }
+
+    #[test]
+    fn splitter_cuts_at_blank_lines_and_waits_for_whole_lines() {
+        let mut sp = BlockSplitter::default();
+        assert!(sp.push("one **bo").is_empty());
+        assert!(sp.push("ld**\ntwo\n").is_empty());
+        assert_eq!(sp.push("\nthree"), ["one **bold**\ntwo\n"]);
+        assert_eq!(sp.finish(), ["three\n"]);
+    }
+
+    #[test]
+    fn splitter_keeps_fenced_code_together() {
+        let blocks = split(&["intro\n\n```rust\nlet a = 1;\n\nlet b = 2;\n```\nafter\n"]);
+        assert_eq!(
+            blocks,
+            [
+                "intro\n",
+                "```rust\nlet a = 1;\n\nlet b = 2;\n```\n",
+                "after\n"
+            ]
+        );
+        // An unclosed fence is flushed at the end.
+        assert_eq!(split(&["```\ncode\n"]), ["```\ncode\n"]);
+    }
+
+    #[test]
+    fn splitter_keeps_loose_lists_together_but_not_what_follows() {
+        let blocks = split(&["1. a\n\n2. b\n\n   more\n\nDone.\n"]);
+        assert_eq!(blocks, ["1. a\n\n2. b\n\n   more\n", "Done.\n"]);
+    }
+
+    #[test]
+    fn splitter_keeps_tables_whole_and_is_chunk_independent() {
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n\ntext\n\n- x\n- y\n";
+        let whole = split(&[md]);
+        assert_eq!(whole.len(), 3);
+        let bytes: Vec<String> = md.chars().map(String::from).collect();
+        let refs: Vec<&str> = bytes.iter().map(String::as_str).collect();
+        assert_eq!(split(&refs), whole);
     }
 }

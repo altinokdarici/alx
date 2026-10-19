@@ -158,6 +158,14 @@ pub enum Event {
     TurnStarted,
     /// A request to the model provider is about to be made.
     ModelRequest,
+    /// A piece of assistant text, sent live while the model is still
+    /// writing. A client that shows these can ignore the `AssistantText`
+    /// that follows (it repeats the same text, whole); one that doesn't can
+    /// ignore these. Not every provider sends deltas.
+    AssistantTextDelta {
+        text: String,
+    },
+    /// A complete block of assistant text.
     AssistantText {
         text: String,
     },
@@ -218,6 +226,15 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&b).unwrap(),
             json!({"type": "tool_result", "tool_use_id": "t1", "content": "ok"})
+        );
+    }
+
+    #[test]
+    fn delta_event_wire_shape() {
+        let e = Event::AssistantTextDelta { text: "hi".into() };
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            json!({"type": "assistant_text_delta", "text": "hi"})
         );
     }
 

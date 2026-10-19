@@ -33,8 +33,12 @@ history if you need it as a reference.
   resolves the pending call. The SDK's CLI download at build time is turned
   off in `.cargo/config.toml`.
 - `AnthropicProvider` streams (`stream: true`, SSE) and reassembles the events into
-  one `CompletionResponse`; the loop and CLI still see whole responses (no delta
-  events yet). Dropping the request future closes the connection.
+  one `CompletionResponse`. `Provider::complete_streaming` also reports text pieces,
+  which the loop emits as `Event::AssistantTextDelta` before the whole
+  `AssistantText` (default impl: no deltas, so Copilot is unchanged). The CLI
+  splits streamed text into Markdown blocks (`BlockSplitter`) and prints each
+  block once complete, and skips the repeated `AssistantText`. Dropping the
+  request future closes the connection.
 - `AnthropicProvider` turns on automatic prompt caching (top-level
   `cache_control`) and reports `Usage` (including cache read/write tokens) on
   each response; the agent sums it per turn into `TurnFinished`, and the CLI

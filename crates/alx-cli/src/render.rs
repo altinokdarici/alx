@@ -134,6 +134,13 @@ struct State {
     /// A tool call line was printed without its newline, awaiting the result.
     open_call: bool,
     last_model: Option<String>,
+    /// Streamed text waiting for its block to be complete.
+    splitter: crate::markdown::BlockSplitter,
+    /// Deltas were seen since the last model request, so the whole
+    /// `AssistantText` that follows them is already on screen.
+    streamed: bool,
+    /// The `●` marker of the current answer has been printed.
+    answer_started: bool,
 }
 
 /// Turns events into terminal text.
@@ -166,12 +173,36 @@ impl Renderer {
         };
         st.thinking = false;
 
+        // Anything else ends the streamed text: show what is left of it.
+        let mut flushed = String::new();
+        if !matches!(
+            event,
+            Event::AssistantTextDelta { .. } | Event::AssistantText { .. }
+        ) {
+            if matches!(event, Event::TurnStarted) {
+                // Left over from a turn that failed: don't show it late.
+                st.splitter = Default::default();
+            }
+            let rest = st.splitter.finish();
+            flushed = self.blocks(&mut st, &rest);
+            st.streamed = false;
+            st.answer_started = false;
+        }
+
         let body = match event {
             Event::ModelRequest if style.color => {
                 st.thinking = true;
-                return Some(style.dim("… thinking"));
+                return Some(format!("{before}{flushed}{}", style.dim("… thinking")));
             }
             Event::ModelRequest | Event::TurnStarted => None,
+            Event::AssistantTextDelta { text } => {
+                st.streamed = true;
+                let done = st.splitter.push(text);
+                let shown = self.blocks(&mut st, &done);
+                (!shown.is_empty()).then_some(shown)
+            }
+            // Already shown, block by block, as it streamed in.
+            Event::AssistantText { .. } if st.streamed => None,
             Event::AssistantText { text } => {
                 let text = crate::markdown::render(text.trim(), style, width().saturating_sub(2));
                 let text = indent(&text, "  ");
@@ -218,10 +249,29 @@ impl Renderer {
             }
         };
         match body {
-            Some(body) => Some(format!("{before}{body}")),
-            None if !before.is_empty() => Some(before.to_owned()),
+            Some(body) => Some(format!("{before}{flushed}{body}")),
+            None if !before.is_empty() || !flushed.is_empty() => Some(format!("{before}{flushed}")),
             None => None,
         }
+    }
+
+    /// Renders streamed Markdown blocks: the first behind the `●` marker,
+    /// the rest under it, separated by a blank line.
+    fn blocks(&self, st: &mut State, blocks: &[String]) -> String {
+        let style = &self.style;
+        let mut out = String::new();
+        for block in blocks {
+            let text = crate::markdown::render(block.trim(), style, width().saturating_sub(2));
+            let text = indent(&text, "  ");
+            if st.answer_started {
+                out.push_str(&format!("  \n{text}\n"));
+            } else {
+                let text = text.strip_prefix("  ").unwrap_or(&text);
+                out.push_str(&format!("\n{} {text}\n", style.cyan_bold("●")));
+                st.answer_started = true;
+            }
+        }
+        out
     }
 
     fn finished(&self, output: &str, is_error: bool) -> String {
@@ -451,5 +501,61 @@ mod tests {
         let expected = "tokens: 2.5k in (2.0k cache read, 400 cache write) / 50 out\n";
         assert_eq!(r.handle(&done).unwrap(), expected);
         assert_eq!(r.handle(&done).unwrap(), expected);
+    }
+
+    fn delta(r: &Renderer, t: &str) -> Option<String> {
+        r.handle(&Event::AssistantTextDelta { text: t.into() })
+    }
+
+    #[test]
+    fn streamed_text_shows_per_block_and_the_whole_text_is_not_repeated() {
+        let r = Renderer::new(PLAIN, false);
+        r.handle(&Event::ModelRequest);
+        assert!(delta(&r, "Hello **wor").is_none());
+        assert!(delta(&r, "ld**\n").is_none());
+        assert_eq!(delta(&r, "\nSecond ").unwrap(), "\n● Hello world\n");
+        assert!(delta(&r, "para").is_none());
+        // The whole text arrives after the deltas: nothing more to show.
+        assert!(
+            r.handle(&Event::AssistantText {
+                text: "Hello **world**\n\nSecond para".into()
+            })
+            .is_none()
+        );
+        // The next event flushes the unfinished block, under the same marker.
+        let done = Event::TurnFinished {
+            stop_reason: alx_core::protocol::StopReason::EndTurn,
+            model: None,
+            usage: None,
+        };
+        assert_eq!(r.handle(&done).unwrap(), "  \n  Second para\n");
+        // A later answer is shown normally again.
+        r.handle(&Event::ModelRequest);
+        let s = r
+            .handle(&Event::AssistantText {
+                text: "again".into(),
+            })
+            .unwrap();
+        assert_eq!(s, "\n● again\n");
+    }
+
+    #[test]
+    fn streamed_text_is_flushed_before_a_tool_call_and_discarded_after_a_failed_turn() {
+        let r = Renderer::new(PLAIN, false);
+        delta(&r, "let me look");
+        let s = call(&r, "ls");
+        assert!(s.starts_with("\n● let me look\n"), "{s:?}");
+        finish(&r, "", false);
+        // A turn that ended in an error leaves text behind; the next turn
+        // must not show it.
+        delta(&r, "stale");
+        r.handle(&Event::TurnStarted);
+        assert_eq!(r.handle(&Event::ModelRequest), None);
+        let s = r
+            .handle(&Event::AssistantText {
+                text: "fresh".into(),
+            })
+            .unwrap();
+        assert_eq!(s, "\n● fresh\n");
     }
 }
