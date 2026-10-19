@@ -1,20 +1,21 @@
-//! Terminal rendering of core events: colors, indentation and truncation.
+//! Terminal rendering of core events, kept compact: a tool call is one line
+//! (`▸ bash ls -la  ✓ 12 lines`), the "thinking" hint is erased when the
+//! answer arrives, and full tool output is only shown with `--verbose`.
 //!
-//! `format_event` is pure (event in, text out) so it can be tested without a
-//! terminal. `CliRenderer` only decides about color and which stream to print to.
+//! `Renderer::handle` turns an event into text and holds the little state this
+//! needs, so it can be tested without a terminal. `CliRenderer` only prints.
 
 use alx_core::EventSink;
 use alx_core::protocol::Event;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
+use std::sync::Mutex;
 
-/// Tool output longer than this many lines is cut, with a note on what was hidden.
+/// With `--verbose`, tool output longer than this many lines is cut.
 const MAX_OUTPUT_LINES: usize = 20;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stream {
-    Stdout,
-    Stderr,
-}
+/// Failed tool calls show at most this many lines of output.
+const MAX_ERROR_LINES: usize = 5;
+/// Clears the current terminal line.
+const CLEAR_LINE: &str = "\r\x1b[2K";
 
 /// ANSI styling that degrades to plain text when color is off.
 #[derive(Debug, Clone, Copy)]
@@ -87,98 +88,182 @@ fn indent(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
-fn truncate_lines(text: &str, max: usize) -> (String, usize) {
-    let total = text.lines().count();
-    if total <= max {
-        return (text.trim_end().to_owned(), 0);
+/// Cuts `s` to `max` characters, ending in `…` when something was dropped.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
     }
-    let kept = text.lines().take(max).collect::<Vec<_>>().join("\n");
-    (kept, total - max)
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
 }
 
-/// Format one event; `None` means nothing to show.
-pub fn format_event(style: &Style, event: &Event) -> Option<(Stream, String)> {
-    match event {
-        Event::ModelRequest => Some((Stream::Stdout, style.dim("… thinking"))),
-        Event::AssistantText { text } => Some((
-            Stream::Stdout,
-            format!(
-                "\n{}\n{}\n",
-                style.cyan_bold("● alx"),
-                indent(text.trim(), "  ")
-            ),
-        )),
-        Event::ToolCallStarted { name, input, .. } => {
-            let detail = match input.get("input").and_then(|v| v.as_str()) {
-                Some(script) if name == "bash" => script.to_owned(),
-                _ => input.to_string(),
-            };
-            let mut lines = detail.lines();
-            let first = lines.next().unwrap_or("");
-            let mut out = format!(
-                "{} {}",
-                style.yellow(&format!("▸ {name}")),
-                style.bold(first)
-            );
-            for l in lines {
-                out.push_str(&format!("\n  {}", style.bold(l)));
-            }
-            Some((Stream::Stdout, out))
+fn width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .filter(|&c| c >= 40)
+        .unwrap_or(100)
+}
+
+/// The one-line description of a tool call, e.g. `ls -la` (+2 lines).
+fn call_summary(name: &str, input: &serde_json::Value) -> String {
+    let detail = match input.get("input").and_then(|v| v.as_str()) {
+        Some(script) if name == "bash" => script.to_owned(),
+        _ => input.to_string(),
+    };
+    let mut lines = detail.lines().filter(|l| !l.trim().is_empty());
+    let first = lines.next().unwrap_or("").trim();
+    let more = lines.count();
+    let room = width().saturating_sub(name.len() + 16);
+    let mut out = clip(first, room);
+    if more > 0 {
+        out.push_str(&format!(" (+{more} lines)"));
+    }
+    out
+}
+
+fn plural(n: usize) -> String {
+    format!("{n} line{}", if n == 1 { "" } else { "s" })
+}
+
+#[derive(Default)]
+struct State {
+    /// A transient "thinking" hint is on the current line.
+    thinking: bool,
+    /// A tool call line was printed without its newline, awaiting the result.
+    open_call: bool,
+    last_model: Option<String>,
+}
+
+/// Turns events into terminal text.
+pub struct Renderer {
+    style: Style,
+    verbose: bool,
+    state: Mutex<State>,
+}
+
+impl Renderer {
+    pub fn new(style: Style, verbose: bool) -> Self {
+        Self {
+            style,
+            verbose,
+            state: Mutex::default(),
         }
-        Event::ToolCallFinished {
-            output, is_error, ..
-        } => {
-            let (shown, hidden) = truncate_lines(output, MAX_OUTPUT_LINES);
-            if shown.is_empty() && hidden == 0 {
-                return Some((Stream::Stdout, style.dim("  (no output)")));
+    }
+
+    /// The text to print for `event` (it carries its own newlines), or `None`.
+    pub fn handle(&self, event: &Event) -> Option<String> {
+        let style = &self.style;
+        let mut st = self.state.lock().unwrap();
+        // Whatever is half-printed on the current line has to be dealt with first.
+        let before = if st.thinking {
+            CLEAR_LINE
+        } else if st.open_call && !matches!(event, Event::ToolCallFinished { .. }) {
+            "\n"
+        } else {
+            ""
+        };
+        st.thinking = false;
+
+        let body = match event {
+            Event::ModelRequest if style.color => {
+                st.thinking = true;
+                return Some(style.dim("… thinking"));
             }
+            Event::ModelRequest | Event::TurnStarted => None,
+            Event::AssistantText { text } => {
+                let text = indent(text.trim(), "  ");
+                let text = text.strip_prefix("  ").unwrap_or(&text);
+                Some(format!("\n{} {text}\n", style.cyan_bold("●")))
+            }
+            Event::ToolCallStarted { name, input, .. } => {
+                st.open_call = true;
+                Some(format!(
+                    "{} {}",
+                    style.yellow(&format!("▸ {name}")),
+                    style.bold(&call_summary(name, input))
+                ))
+            }
+            Event::ToolCallFinished {
+                output, is_error, ..
+            } => {
+                st.open_call = false;
+                Some(self.finished(output, *is_error))
+            }
+            Event::TurnFinished {
+                model: Some(model), ..
+            } if st.last_model.as_deref() != Some(model) => {
+                st.last_model = Some(model.clone());
+                Some(format!("{}\n", style.dim(&format!("model: {model}"))))
+            }
+            Event::TurnFinished { .. } => None,
+        };
+        match body {
+            Some(body) => Some(format!("{before}{body}")),
+            None if !before.is_empty() => Some(before.to_owned()),
+            None => None,
+        }
+    }
+
+    fn finished(&self, output: &str, is_error: bool) -> String {
+        let style = &self.style;
+        let lines: Vec<&str> = output.lines().collect();
+        let status = if is_error {
+            style.red("✗")
+        } else {
+            style.green("✓")
+        };
+        let note = match lines.len() {
+            0 => String::new(),
+            n => style.dim(&format!(" {}", plural(n))),
+        };
+        let mut out = format!("  {status}{note}\n");
+        // Errors always show some output; successes only when verbose.
+        let max = match (self.verbose, is_error) {
+            (true, _) => MAX_OUTPUT_LINES,
+            (false, true) => MAX_ERROR_LINES,
+            (false, false) => 0,
+        };
+        if max > 0 {
             let bar = style.dim("  │ ");
-            let mut body = shown
-                .lines()
-                .map(|l| {
-                    let l = if *is_error {
-                        style.red(l)
-                    } else {
-                        l.to_owned()
-                    };
-                    format!("{bar}{l}")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if hidden > 0 {
-                body.push_str(&format!(
-                    "\n{}",
-                    style.dim(&format!("  … {hidden} more lines"))
+            for l in lines.iter().take(max) {
+                let l = if is_error {
+                    style.red(l)
+                } else {
+                    (*l).to_owned()
+                };
+                out.push_str(&format!("{bar}{l}\n"));
+            }
+            if lines.len() > max {
+                out.push_str(&format!(
+                    "{}\n",
+                    style.dim(&format!("  … {} more lines", lines.len() - max))
                 ));
             }
-            let stream = if *is_error {
-                Stream::Stderr
-            } else {
-                Stream::Stdout
-            };
-            Some((stream, body))
         }
-        Event::TurnFinished {
-            model: Some(model), ..
-        } => Some((
-            Stream::Stdout,
-            format!("{}\n", style.dim(&format!("model: {model}"))),
-        )),
-        Event::TurnStarted | Event::TurnFinished { .. } => None,
+        out
     }
 }
 
-/// Prints core events to stdout/stderr.
+/// Prints core events to stdout.
 pub struct CliRenderer {
-    pub style: Style,
+    renderer: Renderer,
+}
+
+impl CliRenderer {
+    pub fn new(style: Style, verbose: bool) -> Self {
+        Self {
+            renderer: Renderer::new(style, verbose),
+        }
+    }
 }
 
 impl EventSink for CliRenderer {
     fn emit(&self, event: Event) {
-        match format_event(&self.style, &event) {
-            Some((Stream::Stdout, s)) => println!("{s}"),
-            Some((Stream::Stderr, s)) => eprintln!("{s}"),
-            None => {}
+        if let Some(text) = self.renderer.handle(&event) {
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
         }
     }
 }
@@ -190,64 +275,118 @@ mod tests {
 
     const PLAIN: Style = Style { color: false };
 
-    fn text(e: Event) -> String {
-        format_event(&PLAIN, &e).unwrap().1
-    }
-
-    #[test]
-    fn bash_call_shows_script() {
-        let s = text(Event::ToolCallStarted {
+    fn call(r: &Renderer, script: &str) -> String {
+        r.handle(&Event::ToolCallStarted {
             id: "1".into(),
             name: "bash".into(),
-            input: json!({"input": "ls -la"}),
-        });
-        assert_eq!(s, "▸ bash ls -la");
+            input: json!({"input": script}),
+        })
+        .unwrap()
+    }
+
+    fn finish(r: &Renderer, output: &str, is_error: bool) -> String {
+        r.handle(&Event::ToolCallFinished {
+            id: "1".into(),
+            name: "bash".into(),
+            output: output.into(),
+            is_error,
+        })
+        .unwrap()
     }
 
     #[test]
-    fn assistant_text_is_indented() {
-        let s = text(Event::AssistantText {
-            text: "a\nb".into(),
-        });
-        assert!(s.contains("● alx\n  a\n  b"));
+    fn tool_call_is_one_line_with_a_summary() {
+        let r = Renderer::new(PLAIN, false);
+        let out = call(&r, "ls -la") + &finish(&r, "a\nb\nc\n", false);
+        assert_eq!(out, "▸ bash ls -la  ✓ 3 lines\n");
     }
 
     #[test]
-    fn long_output_is_truncated() {
+    fn multi_line_scripts_show_only_the_first_line() {
+        let r = Renderer::new(PLAIN, false);
+        assert_eq!(call(&r, "cd x\nmake\nmake test"), "▸ bash cd x (+2 lines)");
+    }
+
+    #[test]
+    fn verbose_shows_output_and_truncates() {
+        let r = Renderer::new(PLAIN, true);
+        call(&r, "seq 30");
         let output = (0..30)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let s = text(Event::ToolCallFinished {
-            id: "1".into(),
-            name: "bash".into(),
-            output,
-            is_error: false,
-        });
-        assert!(s.ends_with("… 10 more lines"));
-        assert_eq!(s.lines().count(), 21);
+        let s = finish(&r, &output, false);
+        assert!(s.starts_with("  ✓ 30 lines\n  │ 0\n"));
+        assert!(s.ends_with("  … 10 more lines\n"));
+        assert_eq!(s.lines().count(), 1 + 20 + 1);
     }
 
     #[test]
-    fn errors_go_to_stderr_and_empty_output_is_noted() {
-        let (stream, _) = format_event(
-            &PLAIN,
-            &Event::ToolCallFinished {
-                id: "1".into(),
-                name: "bash".into(),
-                output: "boom".into(),
-                is_error: true,
-            },
-        )
-        .unwrap();
-        assert_eq!(stream, Stream::Stderr);
-        let s = text(Event::ToolCallFinished {
-            id: "1".into(),
-            name: "bash".into(),
-            output: String::new(),
-            is_error: false,
-        });
-        assert_eq!(s, "  (no output)");
+    fn errors_show_a_few_lines_even_when_not_verbose() {
+        let r = Renderer::new(PLAIN, false);
+        call(&r, "false");
+        let output = (0..9)
+            .map(|i| format!("e{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let s = finish(&r, &output, true);
+        assert!(s.starts_with("  ✗ 9 lines\n  │ e0\n"));
+        assert!(s.ends_with("  … 4 more lines\n"));
+    }
+
+    #[test]
+    fn empty_output_has_no_line_count() {
+        let r = Renderer::new(PLAIN, false);
+        call(&r, "true");
+        assert_eq!(finish(&r, "", false), "  ✓\n");
+    }
+
+    #[test]
+    fn interrupted_call_line_is_terminated() {
+        let r = Renderer::new(PLAIN, false);
+        call(&r, "sleep 1");
+        let s = r
+            .handle(&Event::AssistantText { text: "hi".into() })
+            .unwrap();
+        assert!(s.starts_with("\n\n● hi"));
+    }
+
+    #[test]
+    fn assistant_text_hangs_its_continuation_lines() {
+        let r = Renderer::new(PLAIN, false);
+        let s = r
+            .handle(&Event::AssistantText {
+                text: "a\nb".into(),
+            })
+            .unwrap();
+        assert_eq!(s, "\n● a\n  b\n");
+    }
+
+    #[test]
+    fn thinking_hint_is_erased_by_the_next_event() {
+        let r = Renderer::new(Style { color: true }, false);
+        assert!(r.handle(&Event::ModelRequest).unwrap().contains("thinking"));
+        let s = r
+            .handle(&Event::AssistantText { text: "hi".into() })
+            .unwrap();
+        assert!(s.starts_with(CLEAR_LINE));
+        // And not shown at all without a terminal.
+        assert!(
+            Renderer::new(PLAIN, false)
+                .handle(&Event::ModelRequest)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn model_is_only_shown_when_it_changes() {
+        let r = Renderer::new(PLAIN, false);
+        let done = || Event::TurnFinished {
+            stop_reason: alx_core::protocol::StopReason::EndTurn,
+            model: Some("m1".into()),
+        };
+        assert_eq!(r.handle(&done()).unwrap(), "model: m1\n");
+        assert!(r.handle(&done()).is_none());
     }
 
     #[test]

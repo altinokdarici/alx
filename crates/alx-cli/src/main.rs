@@ -39,6 +39,9 @@ struct Cli {
     /// Resume the session with this id (see --list-sessions).
     #[arg(long, value_name = "ID", conflicts_with = "list_sessions")]
     resume: Option<String>,
+    /// Show the full output of tool calls, not just a one-line summary.
+    #[arg(short, long)]
+    verbose: bool,
     /// List stored sessions and exit.
     #[arg(long)]
     list_sessions: bool,
@@ -140,7 +143,7 @@ async fn run() -> anyhow::Result<u8> {
         "{}",
         render::banner(&style, &info.name, info.model.as_deref())
     );
-    let renderer = CliRenderer { style };
+    let renderer = CliRenderer::new(style, cli.verbose);
     let mut session = match resumed {
         Some(s) => {
             println!("Resumed session {} ({} messages)", s.id, s.messages.len());

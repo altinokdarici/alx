@@ -48,7 +48,7 @@ history if you need it as a reference.
 - `crates/alx-core`: agent loop, traits, built-in implementations, and
   `agent_from_env` / `load_dotenv`, the default wiring for binaries
 - `crates/alx-cli`: the `alx` binary, an interactive line-based REPL;
-  `render.rs` formats events (ANSI color on a TTY, off with `NO_COLOR`)
+  `render.rs` formats events compactly (one line per tool call, full output with `--verbose`; ANSI color on a TTY, off with `NO_COLOR`)
 - `alx-cli` calls `alx-core` directly, in-process. A headless server and the
   transport clients use to reach it are still to be designed.
 
