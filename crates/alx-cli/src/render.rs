@@ -30,7 +30,7 @@ impl Style {
         Self { color }
     }
 
-    fn paint(&self, code: &str, s: &str) -> String {
+    pub(crate) fn paint(&self, code: &str, s: &str) -> String {
         if self.color {
             format!("\x1b[{code}m{s}\x1b[0m")
         } else {
@@ -172,7 +172,8 @@ impl Renderer {
             }
             Event::ModelRequest | Event::TurnStarted => None,
             Event::AssistantText { text } => {
-                let text = indent(text.trim(), "  ");
+                let text = crate::markdown::render(text.trim(), style, width());
+                let text = indent(&text, "  ");
                 let text = text.strip_prefix("  ").unwrap_or(&text);
                 Some(format!("\n{} {text}\n", style.cyan_bold("●")))
             }

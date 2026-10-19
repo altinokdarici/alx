@@ -4,6 +4,7 @@
 //! `alx_core::agent_from_settings`; this crate only reads input and renders core
 //! events in `CliRenderer`.
 
+mod markdown;
 mod render;
 
 use alx_core::protocol::{Message, StopReason};
