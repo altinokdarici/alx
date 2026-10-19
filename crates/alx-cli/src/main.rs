@@ -14,10 +14,10 @@ use alx_core::{
 };
 use clap::Parser;
 use render::{CliRenderer, Style};
-use std::io::Write;
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// Command-line flags: the highest-precedence settings layer.
 #[derive(Parser)]
@@ -158,24 +158,33 @@ async fn run() -> anyhow::Result<u8> {
             s
         }
     };
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    // Line editing (arrows, Home/End, Up/Down history). It reads stdin in
+    // the terminal's raw mode only while waiting at the prompt, so Ctrl-C
+    // during a turn still arrives as a signal. Piped input is read plainly.
+    let mut editor = Some(DefaultEditor::new()?);
 
     loop {
-        print!("{}", render::prompt(&style));
-        std::io::stdout().flush()?;
-        // Ctrl-C at the prompt exits (it is handled, not default-killed,
-        // because the turn below installs a signal handler).
-        let line = tokio::select! {
-            line = lines.next_line() => line?,
-            _ = tokio::signal::ctrl_c() => {
-                println!();
-                return Ok(130);
-            }
+        let prompt = render::prompt(&style);
+        let mut rl = editor.take().expect("editor is put back after each read");
+        let (rl, read) = tokio::task::spawn_blocking(move || {
+            let read = rl.readline(&prompt);
+            (rl, read)
+        })
+        .await?;
+        editor = Some(rl);
+        let line = match read {
+            Ok(line) => line,
+            Err(ReadlineError::Eof) => break,
+            // Ctrl-C at the prompt exits.
+            Err(ReadlineError::Interrupted) => return Ok(130),
+            Err(e) => return Err(e.into()),
         };
-        let Some(line) = line else {
-            break;
-        }; // EOF
         let input = line.trim();
+        if !input.is_empty()
+            && let Some(rl) = editor.as_mut()
+        {
+            let _ = rl.add_history_entry(input);
+        }
         if input == "exit" || input == "quit" {
             break;
         }
