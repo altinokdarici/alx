@@ -5,7 +5,9 @@ pub mod anthropic;
 #[cfg(feature = "copilot")]
 pub mod copilot;
 
-use alx_protocol::{ContentBlock, Message, ProviderInfo, StopReason, ToolSpec, Usage};
+use alx_protocol::{
+    Compaction, ContentBlock, ContextUsage, Message, ProviderInfo, StopReason, ToolSpec, Usage,
+};
 use async_trait::async_trait;
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,10 @@ pub struct CompletionResponse {
     pub model: Option<String>,
     /// Token usage for this request, when the provider reports it.
     pub usage: Option<Usage>,
+    /// How full the context window is after this response, when known.
+    pub context: Option<ContextUsage>,
+    /// Compactions the provider ran by itself while producing this response.
+    pub compactions: Vec<Compaction>,
 }
 
 #[async_trait]
@@ -32,6 +38,13 @@ pub trait Provider: Send + Sync {
     fn info(&self) -> ProviderInfo;
 
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse>;
+
+    /// Compact the conversation now, if the provider keeps one it can
+    /// compact. `Ok(None)` means there was nothing to compact. Providers that
+    /// can't compact return an error (the default).
+    async fn compact(&self) -> anyhow::Result<Option<Compaction>> {
+        anyhow::bail!("the {} provider cannot compact", self.info().name)
+    }
 
     /// Like [`complete`](Self::complete), but calls `on_text` with each piece
     /// of text as the model writes it. The returned response is the same

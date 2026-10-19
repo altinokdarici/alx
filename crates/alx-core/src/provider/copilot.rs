@@ -20,17 +20,20 @@
 //! transcript.
 
 use super::{CompletionRequest, CompletionResponse, Provider};
-use alx_protocol::{ContentBlock, Message, ProviderInfo, Role, StopReason, ToolSpec};
+use alx_protocol::{
+    Compaction, ContentBlock, ContextUsage, Message, ProviderInfo, Role, StopReason, ToolSpec,
+};
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use github_copilot_sdk::rpc::HandlePendingToolCallRequest;
 use github_copilot_sdk::session::Session;
 use github_copilot_sdk::session_events::{
-    AssistantMessageData, ExternalToolRequestedData, SessionErrorData, SessionEventType,
+    AssistantMessageData, ExternalToolRequestedData, SessionCompactionCompleteData,
+    SessionErrorData, SessionEventType, SessionUsageInfoData,
 };
 use github_copilot_sdk::{
-    CliProgram, Client, ClientMode, ClientOptions, EventSubscription, RequestId, SessionConfig,
-    SessionEvent, SystemMessageConfig, Tool, ToolSet,
+    CliProgram, Client, ClientMode, ClientOptions, EventSubscription, InfiniteSessionConfig,
+    RequestId, SessionConfig, SessionEvent, SystemMessageConfig, Tool, ToolSet,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -168,7 +171,11 @@ impl CopilotProvider {
             // Only alx's tools, none of Copilot's built-ins.
             .with_available_tools(ToolSet::new().add_custom("*")?.into_vec())
             // alx decides what its tools may do; Copilot shouldn't ask.
-            .approve_all_permissions();
+            .approve_all_permissions()
+            // Copilot compacts the conversation itself as the window fills
+            // (background at 80%, blocking at 95%). Say so rather than
+            // rely on the CLI's default.
+            .with_infinite_sessions(InfiniteSessionConfig::new().with_enabled(true));
         if let Some(model) = &self.config.model {
             config = config.with_model(model);
         }
@@ -267,7 +274,13 @@ impl CopilotProvider {
             }
         };
 
-        let (content, requests, model) = collector.finish();
+        let Collected {
+            content,
+            requests,
+            model,
+            context,
+            compactions,
+        } = collector.finish();
         live.pending.extend(requests);
         live.seen = req.messages;
         live.seen.push(Message {
@@ -279,6 +292,8 @@ impl CopilotProvider {
             stop_reason,
             model,
             usage: None,
+            context,
+            compactions,
         })
     }
 }
@@ -301,6 +316,48 @@ impl Provider for CopilotProvider {
             *state = State::default();
         }
         result
+    }
+
+    async fn compact(&self) -> anyhow::Result<Option<Compaction>> {
+        let mut state = self.state.lock().await;
+        let Some(live) = &mut state.live else {
+            return Ok(None);
+        };
+        if !live.pending.is_empty() {
+            bail!("a tool call is still pending; finish or restart the turn first");
+        }
+        let result = live
+            .session
+            .rpc()
+            .history()
+            .compact()
+            .await
+            .context("compacting the Copilot session")?;
+        if !result.success {
+            bail!("Copilot could not compact the conversation");
+        }
+        // The session reports the compaction on its event stream too. Read
+        // those events now, or the next `complete` would report them again.
+        let mut reported = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Ok(Ok(event)) = timeout_at(deadline, live.events.recv()).await {
+            if let Incoming::Compacted(c) = Incoming::from_event(&event) {
+                reported = Some(c);
+                break;
+            }
+        }
+        if reported.is_some() {
+            return Ok(reported);
+        }
+        let after = result
+            .context_window
+            .as_ref()
+            .map(|w| w.current_tokens.max(0) as u64);
+        Ok(Some(Compaction {
+            messages_removed: result.messages_removed.max(0) as u64,
+            tokens_before: after.map(|a| a + result.tokens_removed.max(0) as u64),
+            tokens_after: after,
+        }))
     }
 }
 
@@ -434,6 +491,8 @@ enum Incoming {
         request_id: RequestId,
     },
     Idle,
+    Context(ContextUsage),
+    Compacted(Compaction),
     Error(String),
     Other,
 }
@@ -463,6 +522,26 @@ impl Incoming {
                     None => Self::Error("malformed external_tool.requested event".into()),
                 }
             }
+            SessionEventType::SessionUsageInfo => {
+                match event.typed_data::<SessionUsageInfoData>() {
+                    Some(d) if d.token_limit > 0 => Self::Context(ContextUsage {
+                        used_tokens: d.current_tokens.max(0) as u64,
+                        limit_tokens: d.token_limit as u64,
+                    }),
+                    _ => Self::Other,
+                }
+            }
+            // A failed compaction changes nothing, so there is nothing to report.
+            SessionEventType::SessionCompactionComplete => {
+                match event.typed_data::<SessionCompactionCompleteData>() {
+                    Some(d) if d.success => Self::Compacted(Compaction {
+                        messages_removed: d.messages_removed.unwrap_or(0).max(0) as u64,
+                        tokens_before: d.pre_compaction_tokens.map(|t| t.max(0) as u64),
+                        tokens_after: d.post_compaction_tokens.map(|t| t.max(0) as u64),
+                    }),
+                    _ => Self::Other,
+                }
+            }
             SessionEventType::SessionIdle => Self::Idle,
             SessionEventType::SessionError => Self::Error(
                 event
@@ -474,6 +553,14 @@ impl Incoming {
     }
 }
 
+struct Collected {
+    content: Vec<ContentBlock>,
+    requests: Vec<(String, RequestId)>,
+    model: Option<String>,
+    context: Option<ContextUsage>,
+    compactions: Vec<Compaction>,
+}
+
 /// Folds Copilot events into one alx assistant message.
 #[derive(Default)]
 struct Collector {
@@ -481,6 +568,8 @@ struct Collector {
     announced: usize,
     requests: Vec<(String, RequestId)>,
     model: Option<String>,
+    context: Option<ContextUsage>,
+    compactions: Vec<Compaction>,
 }
 
 impl Collector {
@@ -522,14 +611,22 @@ impl Collector {
             }
             Incoming::Idle if self.has_tool_calls() => return Ok(Some(StopReason::ToolUse)),
             Incoming::Idle => return Ok(Some(StopReason::EndTurn)),
+            Incoming::Context(c) => self.context = Some(c),
+            Incoming::Compacted(c) => self.compactions.push(c),
             Incoming::Error(message) => return Err(anyhow!("Copilot error: {message}")),
             Incoming::Other => {}
         }
         Ok(None)
     }
 
-    fn finish(self) -> (Vec<ContentBlock>, Vec<(String, RequestId)>, Option<String>) {
-        (self.content, self.requests, self.model)
+    fn finish(self) -> Collected {
+        Collected {
+            content: self.content,
+            requests: self.requests,
+            model: self.model,
+            context: self.context,
+            compactions: self.compactions,
+        }
     }
 }
 
@@ -537,6 +634,26 @@ impl Collector {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn collector_keeps_context_and_successful_compactions() {
+        let mut c = Collector::default();
+        let ctx = ContextUsage {
+            used_tokens: 10,
+            limit_tokens: 100,
+        };
+        let done = Compaction {
+            messages_removed: 3,
+            tokens_before: Some(90),
+            tokens_after: Some(10),
+        };
+        c.feed(Incoming::Context(ctx)).unwrap();
+        c.feed(Incoming::Compacted(done)).unwrap();
+        c.feed(Incoming::Idle).unwrap();
+        let out = c.finish();
+        assert_eq!(out.context, Some(ctx));
+        assert_eq!(out.compactions, vec![done]);
+    }
 
     fn user(text: &str) -> Message {
         Message::user_text(text)
@@ -666,7 +783,12 @@ mod tests {
         assert_eq!(c.feed(msg).unwrap(), None);
         assert_eq!(c.feed(Incoming::Other).unwrap(), None);
         assert_eq!(c.feed(Incoming::Idle).unwrap(), Some(StopReason::EndTurn));
-        let (content, requests, model) = c.finish();
+        let Collected {
+            content,
+            requests,
+            model,
+            ..
+        } = c.finish();
         assert_eq!(
             content,
             vec![ContentBlock::Text {
@@ -689,7 +811,9 @@ mod tests {
         assert_eq!(c.feed(requested("a")).unwrap(), None);
         assert!(c.has_tool_calls());
         assert_eq!(c.feed(requested("b")).unwrap(), Some(StopReason::ToolUse));
-        let (content, requests, _) = c.finish();
+        let Collected {
+            content, requests, ..
+        } = c.finish();
         assert_eq!(content.len(), 3);
         assert_eq!(requests[1].0, "b");
     }

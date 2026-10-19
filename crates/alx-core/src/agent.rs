@@ -28,6 +28,11 @@ pub trait AgentLoop: Send + Sync {
         events: &dyn EventSink,
         cancel: &CancellationToken,
     ) -> anyhow::Result<StopReason>;
+
+    /// Compact the provider's view of the conversation now. Emits
+    /// [`Event::Compacted`] when something was compacted and returns whether
+    /// it was. Errors if the provider can't compact.
+    async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool>;
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +106,13 @@ impl SingleAgent {
                 }
             }
 
+            for c in &resp.compactions {
+                events.emit(Event::Compacted(*c));
+            }
+            if let Some(c) = resp.context {
+                events.emit(Event::ContextUsage(c));
+            }
+
             if resp.stop_reason != StopReason::ToolUse || tool_calls.is_empty() {
                 return Ok(resp.stop_reason);
             }
@@ -169,6 +181,14 @@ fn mark_cancelled(session: &mut Session) -> StopReason {
 
 #[async_trait]
 impl AgentLoop for SingleAgent {
+    async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool> {
+        let compaction = self.provider.compact().await?;
+        if let Some(c) = compaction {
+            events.emit(Event::Compacted(c));
+        }
+        Ok(compaction.is_some())
+    }
+
     async fn run_turn(
         &self,
         session: &mut Session,
@@ -286,9 +306,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_and_compaction_reports_become_events() {
+        use alx_protocol::{Compaction, ContextUsage};
+        let compaction = Compaction {
+            messages_removed: 4,
+            tokens_before: Some(160_000),
+            tokens_after: Some(9_000),
+        };
+        let context = ContextUsage {
+            used_tokens: 9_500,
+            limit_tokens: 200_000,
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![Ok(CompletionResponse {
+            content: vec![text("ok")],
+            stop_reason: StopReason::EndTurn,
+            model: None,
+            usage: None,
+            context: Some(context),
+            compactions: vec![compaction],
+        })]));
+        let agent = agent(provider, Arc::new(FakeExecutor::default()));
+        let sink = VecSink::default();
+        let mut session = Session::new("s");
+        agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &sink,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        {
+            let events = sink.0.lock().unwrap();
+            assert!(events.contains(&Event::Compacted(compaction)));
+            assert!(events.contains(&Event::ContextUsage(context)));
+        }
+
+        // The scripted provider can't compact: the error reaches the caller.
+        let err = agent.compact(&sink).await.unwrap_err();
+        assert!(err.to_string().contains("cannot compact"), "{err}");
+    }
+
+    #[tokio::test]
     async fn runs_tools_until_end_turn() {
         let provider = Arc::new(ScriptedProvider::new(vec![
             Ok(CompletionResponse {
+                context: None,
+                compactions: Vec::new(),
                 content: vec![
                     text("let me look"),
                     ContentBlock::ToolUse {
@@ -312,6 +377,8 @@ mod tests {
                 }),
             }),
             Ok(CompletionResponse {
+                context: None,
+                compactions: Vec::new(),
                 content: vec![text("done")],
                 stop_reason: StopReason::EndTurn,
                 model: Some("m-2".into()),
@@ -435,6 +502,8 @@ mod tests {
             input: json!({"input": "sleep 100"}),
         };
         let provider = Arc::new(ScriptedProvider::new(vec![Ok(CompletionResponse {
+            context: None,
+            compactions: Vec::new(),
             content: vec![call("t1"), call("t2")],
             stop_reason: StopReason::ToolUse,
             model: None,
@@ -515,6 +584,8 @@ mod tests {
             on_text("hel");
             on_text("lo");
             Ok(CompletionResponse {
+                context: None,
+                compactions: Vec::new(),
                 content: vec![text("hello")],
                 stop_reason: StopReason::EndTurn,
                 model: None,

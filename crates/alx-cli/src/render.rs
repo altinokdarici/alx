@@ -141,6 +141,8 @@ struct State {
     streamed: bool,
     /// The `●` marker of the current answer has been printed.
     answer_started: bool,
+    /// The latest context window fill level, shown when the turn finishes.
+    context: Option<alx_core::protocol::ContextUsage>,
 }
 
 /// Turns events into terminal text.
@@ -223,6 +225,11 @@ impl Renderer {
                 st.open_call = false;
                 Some(self.finished(output, *is_error))
             }
+            Event::ContextUsage(c) => {
+                st.context = Some(*c);
+                None
+            }
+            Event::Compacted(c) => Some(format!("{}\n", style.dim(&compaction_line(c)))),
             Event::TurnFinished {
                 model,
                 usage,
@@ -240,6 +247,9 @@ impl Renderer {
                 }
                 if let Some(usage) = usage {
                     lines.push(usage_line(usage));
+                }
+                if let Some(c) = st.context.take() {
+                    lines.push(context_line(&c));
                 }
                 if lines.is_empty() {
                     None
@@ -347,6 +357,28 @@ fn usage_line(u: &alx_core::protocol::Usage) -> String {
         compact(u.cache_write_tokens),
         compact(u.output_tokens)
     )
+}
+
+/// `context: 62.0k / 200.0k (31%)`
+fn context_line(c: &alx_core::protocol::ContextUsage) -> String {
+    let percent = (c.used_tokens * 100)
+        .checked_div(c.limit_tokens)
+        .unwrap_or(0);
+    format!(
+        "context: {} / {} ({percent}%)",
+        compact(c.used_tokens),
+        compact(c.limit_tokens)
+    )
+}
+
+/// `compacted: 12 messages removed, 150.0k -> 8.0k tokens`
+fn compaction_line(c: &alx_core::protocol::Compaction) -> String {
+    let tokens = match (c.tokens_before, c.tokens_after) {
+        (Some(b), Some(a)) => format!(", {} -> {} tokens", compact(b), compact(a)),
+        (None, Some(a)) => format!(", now {} tokens", compact(a)),
+        _ => String::new(),
+    };
+    format!("compacted: {} messages removed{tokens}", c.messages_removed)
 }
 
 fn compact(n: u64) -> String {
@@ -501,6 +533,35 @@ mod tests {
         let expected = "tokens: 2.5k in (2.0k cache read, 400 cache write) / 50 out\n";
         assert_eq!(r.handle(&done).unwrap(), expected);
         assert_eq!(r.handle(&done).unwrap(), expected);
+    }
+
+    #[test]
+    fn context_is_shown_once_per_turn_and_compaction_at_once() {
+        use alx_core::protocol::{Compaction, ContextUsage};
+        let r = Renderer::new(PLAIN, false);
+        assert!(
+            r.handle(&Event::ContextUsage(ContextUsage {
+                used_tokens: 62_000,
+                limit_tokens: 200_000
+            }))
+            .is_none()
+        );
+        let done = Event::TurnFinished {
+            stop_reason: alx_core::protocol::StopReason::EndTurn,
+            model: None,
+            usage: None,
+        };
+        assert_eq!(r.handle(&done).unwrap(), "context: 62.0k / 200.0k (31%)\n");
+        assert!(r.handle(&done).is_none());
+        let c = Event::Compacted(Compaction {
+            messages_removed: 12,
+            tokens_before: Some(150_000),
+            tokens_after: Some(8_000),
+        });
+        assert_eq!(
+            r.handle(&c).unwrap(),
+            "compacted: 12 messages removed, 150.0k -> 8.0k tokens\n"
+        );
     }
 
     fn delta(r: &Renderer, t: &str) -> Option<String> {

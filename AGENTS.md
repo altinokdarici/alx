@@ -53,6 +53,15 @@ history if you need it as a reference.
   same on a deadline (`ExecOutput::timed_out`). `BashTool` defaults to 120s, the
   model can pass `timeout_seconds` (max 1800). The CLI cancels on Ctrl-C, and a
   second Ctrl-C exits. Copilot's pending-call state after a cancel is untested.
+- Compaction: Copilot keeps the history and compacts it itself (infinite
+  sessions, enabled explicitly in `new_session`; background at 80%, blocking at
+  95%). The provider reports it: `CompletionResponse::{context, compactions}`
+  become `Event::ContextUsage` / `Event::Compacted`, and the CLI prints a
+  `context: used / limit (%)` line each turn. `/compact` calls
+  `AgentLoop::compact` -> `Provider::compact` (Copilot: `history.compact` RPC;
+  other providers error). alx's own message list is never compacted, so a
+  resumed or replayed session sends the full transcript to a fresh Copilot
+  session. Anthropic has no compaction yet (its server-side one is beta).
 - Tool output size: `BashTool` cuts stdout and stderr to 30000 bytes each
   (`MAX_OUTPUT_BYTES`), keeping the first quarter and last three quarters with a
   `[... N bytes truncated ...]` marker, because results are re-sent on every

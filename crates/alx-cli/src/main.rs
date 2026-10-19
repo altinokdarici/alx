@@ -182,6 +182,14 @@ async fn run() -> anyhow::Result<u8> {
         if input.is_empty() {
             continue;
         }
+        if input == "/compact" {
+            match agent.compact(&renderer).await {
+                Ok(true) => {}
+                Ok(false) => println!("{}", style.dim("Nothing to compact yet.")),
+                Err(e) => eprintln!("{}", render::error_line(&style, &format!("{e:#}"))),
+            }
+            continue;
+        }
 
         // Ctrl-C cancels the running turn; a second one gives up waiting
         // for it to wind down and exits.

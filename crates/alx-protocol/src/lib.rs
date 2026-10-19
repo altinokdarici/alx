@@ -150,6 +150,25 @@ impl Usage {
     }
 }
 
+/// How full the model's context window is, as the provider reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used_tokens: u64,
+    /// The model's context window size.
+    pub limit_tokens: u64,
+}
+
+/// A finished compaction: older conversation replaced by a summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compaction {
+    pub messages_removed: u64,
+    /// Context size before and after, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_after: Option<u64>,
+}
+
 /// Events emitted by the core while running a turn. UIs (CLI, TUI, web, ...)
 /// render these; they never reach into the core directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -180,6 +199,10 @@ pub enum Event {
         output: String,
         is_error: bool,
     },
+    /// The context window fill level, after a model response.
+    ContextUsage(ContextUsage),
+    /// The provider compacted the conversation (automatically or on request).
+    Compacted(Compaction),
     TurnFinished {
         stop_reason: StopReason,
         /// The model that produced the turn's last response, if the provider

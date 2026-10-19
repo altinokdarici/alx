@@ -259,6 +259,8 @@ impl StreamAccumulator {
             }
         }
         Ok(CompletionResponse {
+            context: None,
+            compactions: Vec::new(),
             content,
             stop_reason,
             model: self.model,
