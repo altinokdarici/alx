@@ -1,7 +1,7 @@
 //! Anthropic Messages API (non-streaming for now).
 
 use super::{CompletionRequest, CompletionResponse, Provider};
-use alx_protocol::{ContentBlock, Message, ProviderInfo, Role};
+use alx_protocol::{ContentBlock, Message, ProviderInfo, Role, Usage};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -55,6 +55,11 @@ impl AnthropicProvider {
         json!({
             "model": self.config.model,
             "stream": false,
+            // Automatic prompt caching: the breakpoint follows the end of the
+            // conversation, so each request reads the previous one's prefix.
+            // Tools and system are rendered in a stable order to keep the
+            // prefix byte-identical between requests.
+            "cache_control": { "type": "ephemeral" },
             "max_tokens": req.max_tokens,
             "system": [{ "type": "text", "text": req.system }],
             "messages": req.messages.iter().map(message_to_wire).collect::<Vec<_>>(),
@@ -124,7 +129,18 @@ fn response_from_wire(data: Value) -> anyhow::Result<CompletionResponse> {
         content,
         stop_reason,
         model: data.get("model").and_then(Value::as_str).map(str::to_owned),
+        usage: data.get("usage").map(usage_from_wire),
     })
+}
+
+fn usage_from_wire(u: &Value) -> Usage {
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cache_read_tokens: n("cache_read_input_tokens"),
+        cache_write_tokens: n("cache_creation_input_tokens"),
+    }
 }
 
 #[async_trait]
@@ -181,6 +197,33 @@ mod tests {
             json!({"role": "user", "content": [{"type": "text", "text": "hi"}]})
         );
         assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
+    }
+
+    #[test]
+    fn parses_usage_including_cache_fields() {
+        let r = response_from_wire(json!({
+            "stop_reason": "end_turn",
+            "content": [],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 300,
+                "cache_creation_input_tokens": 40
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            r.usage,
+            Some(Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 300,
+                cache_write_tokens: 40,
+            })
+        );
+        let none = response_from_wire(json!({"stop_reason": "end_turn", "content": []})).unwrap();
+        assert_eq!(none.usage, None);
     }
 
     #[test]

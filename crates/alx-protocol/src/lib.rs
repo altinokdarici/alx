@@ -121,6 +121,31 @@ pub struct ProviderInfo {
     pub model: Option<String>,
 }
 
+/// Token counts for one or more model requests. Anthropic reports
+/// `input_tokens` separately from cached tokens, so total prompt size is
+/// `input_tokens + cache_read_tokens + cache_write_tokens`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Prompt tokens processed at the full input price.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Prompt tokens served from the prompt cache.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written to the prompt cache.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+}
+
+impl Usage {
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
+    }
+}
+
 /// Events emitted by the core while running a turn. UIs (CLI, TUI, web, ...)
 /// render these; they never reach into the core directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +175,9 @@ pub enum Event {
         /// default or automatic model selection).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Tokens used by all requests in the turn, if the provider reports them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
 }
 
@@ -188,6 +216,7 @@ mod tests {
         let e = Event::TurnFinished {
             stop_reason: StopReason::EndTurn,
             model: None,
+            usage: None,
         };
         assert_eq!(
             serde_json::to_value(&e).unwrap(),

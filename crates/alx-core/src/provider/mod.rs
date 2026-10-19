@@ -5,7 +5,7 @@ pub mod anthropic;
 #[cfg(feature = "copilot")]
 pub mod copilot;
 
-use alx_protocol::{ContentBlock, Message, ProviderInfo, StopReason, ToolSpec};
+use alx_protocol::{ContentBlock, Message, ProviderInfo, StopReason, ToolSpec, Usage};
 use async_trait::async_trait;
 
 #[derive(Debug, Clone)]
@@ -22,6 +22,8 @@ pub struct CompletionResponse {
     pub stop_reason: StopReason,
     /// The model that actually produced this response, when known.
     pub model: Option<String>,
+    /// Token usage for this request, when the provider reports it.
+    pub usage: Option<Usage>,
 }
 
 #[async_trait]

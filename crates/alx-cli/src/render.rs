@@ -190,13 +190,23 @@ impl Renderer {
                 st.open_call = false;
                 Some(self.finished(output, *is_error))
             }
-            Event::TurnFinished {
-                model: Some(model), ..
-            } if st.last_model.as_deref() != Some(model) => {
-                st.last_model = Some(model.clone());
-                Some(format!("{}\n", style.dim(&format!("model: {model}"))))
+            Event::TurnFinished { model, usage, .. } => {
+                let mut lines = Vec::new();
+                if let Some(model) = model
+                    && st.last_model.as_deref() != Some(model)
+                {
+                    st.last_model = Some(model.clone());
+                    lines.push(format!("model: {model}"));
+                }
+                if let Some(usage) = usage {
+                    lines.push(usage_line(usage));
+                }
+                if lines.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}\n", style.dim(&lines.join("\n"))))
+                }
             }
-            Event::TurnFinished { .. } => None,
         };
         match body {
             Some(body) => Some(format!("{before}{body}")),
@@ -265,6 +275,26 @@ impl EventSink for CliRenderer {
             let _ = write!(out, "{text}");
             let _ = out.flush();
         }
+    }
+}
+
+/// `tokens: 12.3k in (11.0k cached, 0.4k new cache) / 0.5k out`
+fn usage_line(u: &alx_core::protocol::Usage) -> String {
+    let total_in = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
+    format!(
+        "tokens: {} in ({} cache read, {} cache write) / {} out",
+        compact(total_in),
+        compact(u.cache_read_tokens),
+        compact(u.cache_write_tokens),
+        compact(u.output_tokens)
+    )
+}
+
+fn compact(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -384,6 +414,7 @@ mod tests {
         let done = || Event::TurnFinished {
             stop_reason: alx_core::protocol::StopReason::EndTurn,
             model: Some("m1".into()),
+            usage: None,
         };
         assert_eq!(r.handle(&done()).unwrap(), "model: m1\n");
         assert!(r.handle(&done()).is_none());
@@ -393,5 +424,23 @@ mod tests {
     fn color_adds_ansi_only_when_enabled() {
         assert!(Style { color: true }.red("x").contains("\x1b[31m"));
         assert_eq!(PLAIN.red("x"), "x");
+    }
+
+    #[test]
+    fn usage_is_shown_every_turn() {
+        let r = Renderer::new(PLAIN, false);
+        let done = Event::TurnFinished {
+            stop_reason: alx_core::protocol::StopReason::EndTurn,
+            model: None,
+            usage: Some(alx_core::protocol::Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 2000,
+                cache_write_tokens: 400,
+            }),
+        };
+        let expected = "tokens: 2.5k in (2.0k cache read, 400 cache write) / 50 out\n";
+        assert_eq!(r.handle(&done).unwrap(), expected);
+        assert_eq!(r.handle(&done).unwrap(), expected);
     }
 }

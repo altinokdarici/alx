@@ -32,6 +32,11 @@ history if you need it as a reference.
   and comes back as a `ToolUse`; alx's loop runs it and the next `complete`
   resolves the pending call. The SDK's CLI download at build time is turned
   off in `.cargo/config.toml`.
+- `AnthropicProvider` turns on automatic prompt caching (top-level
+  `cache_control`) and reports `Usage` (including cache read/write tokens) on
+  each response; the agent sums it per turn into `TurnFinished`, and the CLI
+  prints a `tokens:` line. Keep the prompt prefix (tools, system, history)
+  byte-stable between requests or the cache misses. Copilot reports no usage.
 - `./AGENTS.md` in the working directory, if present, is appended to the system
   prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
 - Sessions are saved after every turn by `FileSessionStore` (one JSONL file per

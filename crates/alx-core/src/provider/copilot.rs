@@ -278,6 +278,7 @@ impl CopilotProvider {
             content,
             stop_reason,
             model,
+            usage: None,
         })
     }
 }

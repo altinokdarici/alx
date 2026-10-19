@@ -4,7 +4,7 @@ use crate::event::EventSink;
 use crate::provider::{CompletionRequest, Provider};
 use crate::session::Session;
 use crate::tool::{ToolContext, ToolRegistry};
-use alx_protocol::{ContentBlock, Event, Message, Role, StopReason};
+use alx_protocol::{ContentBlock, Event, Message, Role, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -54,6 +54,7 @@ impl SingleAgent {
         session: &mut Session,
         events: &dyn EventSink,
         model: &mut Option<String>,
+        usage: &mut Option<Usage>,
     ) -> anyhow::Result<StopReason> {
         loop {
             events.emit(Event::ModelRequest);
@@ -68,6 +69,9 @@ impl SingleAgent {
                 .await?;
             if resp.model.is_some() {
                 model.clone_from(&resp.model);
+            }
+            if let Some(u) = &resp.usage {
+                usage.get_or_insert_with(Usage::default).add(u);
             }
             session.messages.push(Message {
                 role: Role::Assistant,
@@ -128,11 +132,16 @@ impl AgentLoop for SingleAgent {
         session.messages.push(input);
         events.emit(Event::TurnStarted);
         let mut model = None;
-        match self.turn_inner(session, events, &mut model).await {
+        let mut usage = None;
+        match self
+            .turn_inner(session, events, &mut model, &mut usage)
+            .await
+        {
             Ok(stop_reason) => {
                 events.emit(Event::TurnFinished {
                     stop_reason: stop_reason.clone(),
                     model,
+                    usage,
                 });
                 Ok(stop_reason)
             }
@@ -246,11 +255,23 @@ mod tests {
                 ],
                 stop_reason: StopReason::ToolUse,
                 model: None,
+                usage: Some(alx_protocol::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 100,
+                }),
             }),
             Ok(CompletionResponse {
                 content: vec![text("done")],
                 stop_reason: StopReason::EndTurn,
                 model: Some("m-2".into()),
+                usage: Some(alx_protocol::Usage {
+                    input_tokens: 2,
+                    output_tokens: 7,
+                    cache_read_tokens: 100,
+                    cache_write_tokens: 20,
+                }),
             }),
         ]));
         let exec = Arc::new(FakeExecutor::default());
@@ -285,6 +306,12 @@ mod tests {
             Some(&Event::TurnFinished {
                 stop_reason: StopReason::EndTurn,
                 model: Some("m-2".into()),
+                usage: Some(alx_protocol::Usage {
+                    input_tokens: 12,
+                    output_tokens: 12,
+                    cache_read_tokens: 100,
+                    cache_write_tokens: 120
+                }),
             })
         );
         assert!(events.contains(&Event::AssistantText {
