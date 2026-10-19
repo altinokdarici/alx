@@ -418,19 +418,25 @@ impl<'a> Renderer<'a> {
                 *w = (*w).max(visible_width(cell));
             }
         }
-        // Shrink the widest columns until the table fits the line.
+        // Shrink the widest columns until the table fits the line. Borders
+        // take 3 columns between cells and 4 around the outside.
         let prefix_w: usize = self.containers.iter().map(|c| c.cont.chars().count()).sum();
         let avail = self.width.saturating_sub(prefix_w);
-        let seps = 3 * (cols - 1);
+        let borders = 3 * (cols - 1) + 4;
         let min_col = 6;
-        while widths.iter().sum::<usize>() + seps > avail {
+        while widths.iter().sum::<usize>() + borders > avail {
             let (i, &w) = widths.iter().enumerate().max_by_key(|(_, w)| **w).unwrap();
             if w <= min_col {
                 break;
             }
             widths[i] = w - 1;
         }
-        let sep = self.style.paint("2", " │ ");
+        let dim = |x: &str| self.style.paint("2", x);
+        let rule = |l: &str, m: &str, r: &str| {
+            let segs: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+            dim(&format!("{l}{}{r}", segs.join(m)))
+        };
+        self.table_line(&rule("┌", "┬", "┐"));
         for (i, row) in t.rows.iter().enumerate() {
             let wrapped: Vec<Vec<String>> = (0..cols)
                 .map(|c| wrap_ansi(row.get(c).map_or("", String::as_str), widths[c]))
@@ -448,11 +454,13 @@ impl<'a> Renderer<'a> {
                         }
                     })
                     .collect();
-                self.table_line(cells.join(&sep).trim_end());
+                let bar = dim("│");
+                self.table_line(&format!("{bar} {} {bar}", cells.join(&format!(" {bar} "))));
             }
-            if i + 1 == t.header_rows {
-                let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
-                self.table_line(&self.style.paint("2", &rule.join("─┼─")));
+            if i + 1 == t.rows.len() {
+                self.table_line(&rule("└", "┴", "┘"));
+            } else {
+                self.table_line(&rule("├", "┼", "┤"));
             }
         }
     }
@@ -659,7 +667,7 @@ mod tests {
         let md = "| Name | Age |\n|---|---|\n| Bob | 3 |\n| Alexandra | 41 |";
         assert_eq!(
             plain(md),
-            "Name      │ Age\n──────────┼────\nBob       │ 3\nAlexandra │ 41"
+            "┌───────────┬─────┐\n│ Name      │ Age │\n├───────────┼─────┤\n│ Bob       │ 3   │\n├───────────┼─────┤\n│ Alexandra │ 41  │\n└───────────┴─────┘"
         );
     }
 
@@ -667,7 +675,7 @@ mod tests {
     fn styled_cells_align_by_visible_width() {
         let s = render("| a |\n|---|\n| **b** |", &COLOR, 80);
         let widths: Vec<usize> = s.lines().map(visible_width).collect();
-        assert!(widths.iter().all(|w| *w == 1), "{widths:?}\n{s:?}");
+        assert!(widths.iter().all(|w| *w == 5), "{widths:?}\n{s:?}");
     }
 
     #[test]
