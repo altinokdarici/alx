@@ -46,6 +46,10 @@ history if you need it as a reference.
   same on a deadline (`ExecOutput::timed_out`). `BashTool` defaults to 120s, the
   model can pass `timeout_seconds` (max 1800). The CLI cancels on Ctrl-C, and a
   second Ctrl-C exits. Copilot's pending-call state after a cancel is untested.
+- Tool output size: `BashTool` cuts stdout and stderr to 30000 bytes each
+  (`MAX_OUTPUT_BYTES`), keeping the first quarter and last three quarters with a
+  `[... N bytes truncated ...]` marker, because results are re-sent on every
+  request. Other tools must bound their own output.
 - `./AGENTS.md` in the working directory, if present, is appended to the system
   prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
 - Sessions are saved after every turn by `FileSessionStore` (one JSONL file per
