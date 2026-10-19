@@ -56,6 +56,12 @@ struct Renderer<'a> {
     links: Vec<(String, String)>,
     in_code_block: bool,
     table: Option<Table>,
+    /// Visible width of the current output line, prefix included.
+    col: usize,
+    /// The current line has text after its prefix (list marker, quote bar).
+    line_has_text: bool,
+    /// A space is owed before the next word (it is dropped at a wrap).
+    pending_space: bool,
 }
 
 impl<'a> Renderer<'a> {
@@ -73,6 +79,9 @@ impl<'a> Renderer<'a> {
             links: Vec::new(),
             in_code_block: false,
             table: None,
+            col: 0,
+            line_has_text: false,
+            pending_space: false,
         }
     }
 
@@ -248,6 +257,9 @@ impl<'a> Renderer<'a> {
     fn newline(&mut self) {
         self.out.push('\n');
         self.at_line_start = true;
+        self.col = 0;
+        self.line_has_text = false;
+        self.pending_space = false;
     }
 
     fn newline_if_open(&mut self) {
@@ -327,12 +339,51 @@ impl<'a> Renderer<'a> {
             t.cell.push_str(&styled);
             return;
         }
-        if self.at_line_start {
-            let prefix = self.prefix();
-            self.out.push_str(&prefix);
-            self.at_line_start = false;
+        // Word-wrap: break before a word that would run past the width.
+        let paint = |w: &str| {
+            if self.style.color && !codes.is_empty() {
+                self.style.paint(&codes.join(";"), w)
+            } else {
+                w.to_owned()
+            }
+        };
+        let mut pieces: Vec<(String, usize, bool)> = Vec::new(); // (text, width, space owed)
+        let mut pending = self.pending_space;
+        for (i, word) in s.split(' ').enumerate() {
+            if i > 0 {
+                pending = true;
+            }
+            if word.is_empty() {
+                continue;
+            }
+            pieces.push((paint(word), word.chars().count(), pending));
+            pending = false;
         }
-        self.out.push_str(&styled);
+        let trailing_space = s.ends_with(' ');
+        for (text, w, owed) in pieces {
+            if self.at_line_start {
+                let prefix = self.prefix();
+                self.col = visible_width(&prefix);
+                self.out.push_str(&prefix);
+                self.at_line_start = false;
+            }
+            let gap = usize::from((owed || self.pending_space) && self.line_has_text);
+            self.pending_space = false;
+            if self.line_has_text && self.col + gap + w > self.width {
+                self.newline();
+                let prefix = self.prefix();
+                self.col = visible_width(&prefix);
+                self.out.push_str(&prefix);
+                self.at_line_start = false;
+            } else if gap == 1 {
+                self.out.push(' ');
+                self.col += 1;
+            }
+            self.out.push_str(&text);
+            self.col += w;
+            self.line_has_text = true;
+        }
+        self.pending_space = trailing_space;
         self.last_line_blank = false;
         self.suppress_blank = false;
     }
@@ -638,5 +689,33 @@ mod tests {
     fn wrapped_styles_continue_on_the_next_line() {
         let lines = wrap_ansi("\x1b[1maaa bbb ccc\x1b[0m", 7);
         assert_eq!(lines, ["\x1b[1maaa bbb\x1b[0m", "\x1b[1mccc\x1b[0m"]);
+    }
+
+    #[test]
+    fn paragraphs_wrap_at_word_boundaries() {
+        let s = render("one two three four five six seven", &PLAIN, 15);
+        assert_eq!(s, "one two three\nfour five six\nseven");
+    }
+
+    #[test]
+    fn wrapped_list_items_hang_under_their_text() {
+        let s = render("- one two three four five six", &PLAIN, 14);
+        assert_eq!(s, "• one two\n  three four\n  five six");
+        let s = render("> one two three four", &PLAIN, 12);
+        assert_eq!(s, "> one two\n> three four");
+    }
+
+    #[test]
+    fn wrapping_keeps_spaces_around_styled_words() {
+        let s = render("a **b c** d", &PLAIN, 80);
+        assert_eq!(s, "a b c d");
+        let s = render("aaa **bbb** ccc", &PLAIN, 8);
+        assert_eq!(s, "aaa bbb\nccc");
+    }
+
+    #[test]
+    fn long_words_are_not_split() {
+        let s = render("x https://example.com/a/very/long/url y", &PLAIN, 10);
+        assert_eq!(s, "x\nhttps://example.com/a/very/long/url\ny");
     }
 }
