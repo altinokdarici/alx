@@ -22,14 +22,15 @@
 use super::{CompletionRequest, CompletionResponse, Provider};
 use alx_protocol::{
     Compaction, ContentBlock, ContextUsage, Message, ProviderInfo, Role, StopReason, ToolSpec,
+    Usage,
 };
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use github_copilot_sdk::rpc::HandlePendingToolCallRequest;
 use github_copilot_sdk::session::Session;
 use github_copilot_sdk::session_events::{
-    AssistantMessageData, ExternalToolRequestedData, SessionCompactionCompleteData,
-    SessionErrorData, SessionEventType, SessionUsageInfoData,
+    AssistantMessageData, AssistantUsageData, ExternalToolRequestedData,
+    SessionCompactionCompleteData, SessionErrorData, SessionEventType, SessionUsageInfoData,
 };
 use github_copilot_sdk::{
     CliProgram, Client, ClientMode, ClientOptions, EventSubscription, InfiniteSessionConfig,
@@ -280,6 +281,7 @@ impl CopilotProvider {
             model,
             context,
             compactions,
+            usage,
         } = collector.finish();
         live.pending.extend(requests);
         live.seen = req.messages;
@@ -291,7 +293,7 @@ impl CopilotProvider {
             content,
             stop_reason,
             model,
-            usage: None,
+            usage,
             context,
             compactions,
         })
@@ -493,6 +495,7 @@ enum Incoming {
     Idle,
     Context(ContextUsage),
     Compacted(Compaction),
+    Usage(Usage),
     Error(String),
     Other,
 }
@@ -520,6 +523,23 @@ impl Incoming {
                         request_id: data.request_id,
                     },
                     None => Self::Error("malformed external_tool.requested event".into()),
+                }
+            }
+            // Copilot's `input_tokens` counts cached tokens too; alx's don't.
+            // Sub-agent calls are not part of alx's conversation.
+            SessionEventType::AssistantUsage if event.agent_id.is_none() => {
+                match event.typed_data::<AssistantUsageData>() {
+                    Some(d) => {
+                        let n = |v: Option<i64>| v.unwrap_or(0).max(0) as u64;
+                        let (read, write) = (n(d.cache_read_tokens), n(d.cache_write_tokens));
+                        Self::Usage(Usage {
+                            input_tokens: n(d.input_tokens).saturating_sub(read + write),
+                            output_tokens: n(d.output_tokens),
+                            cache_read_tokens: read,
+                            cache_write_tokens: write,
+                        })
+                    }
+                    None => Self::Other,
                 }
             }
             SessionEventType::SessionUsageInfo => {
@@ -559,6 +579,7 @@ struct Collected {
     model: Option<String>,
     context: Option<ContextUsage>,
     compactions: Vec<Compaction>,
+    usage: Option<Usage>,
 }
 
 /// Folds Copilot events into one alx assistant message.
@@ -570,6 +591,7 @@ struct Collector {
     model: Option<String>,
     context: Option<ContextUsage>,
     compactions: Vec<Compaction>,
+    usage: Option<Usage>,
 }
 
 impl Collector {
@@ -613,6 +635,7 @@ impl Collector {
             Incoming::Idle => return Ok(Some(StopReason::EndTurn)),
             Incoming::Context(c) => self.context = Some(c),
             Incoming::Compacted(c) => self.compactions.push(c),
+            Incoming::Usage(u) => self.usage.get_or_insert_with(Usage::default).add(&u),
             Incoming::Error(message) => return Err(anyhow!("Copilot error: {message}")),
             Incoming::Other => {}
         }
@@ -626,6 +649,7 @@ impl Collector {
             model: self.model,
             context: self.context,
             compactions: self.compactions,
+            usage: self.usage,
         }
     }
 }
@@ -634,6 +658,22 @@ impl Collector {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn collector_sums_usage_across_calls() {
+        let mut c = Collector::default();
+        let u = Usage {
+            input_tokens: 4,
+            output_tokens: 6,
+            cache_read_tokens: 100,
+            cache_write_tokens: 10,
+        };
+        c.feed(Incoming::Usage(u)).unwrap();
+        c.feed(Incoming::Usage(u)).unwrap();
+        c.feed(Incoming::Idle).unwrap();
+        let sum = c.finish().usage.unwrap();
+        assert_eq!((sum.input_tokens, sum.cache_read_tokens), (8, 200));
+    }
 
     #[test]
     fn collector_keeps_context_and_successful_compactions() {

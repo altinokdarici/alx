@@ -43,7 +43,7 @@ history if you need it as a reference.
   `cache_control`) and reports `Usage` (including cache read/write tokens) on
   each response; the agent sums it per turn into `TurnFinished`, and the CLI
   prints a `tokens:` line. Keep the prompt prefix (tools, system, history)
-  byte-stable between requests or the cache misses. Copilot reports no usage.
+  byte-stable between requests or the cache misses. Copilot reports usage from its `assistant.usage` events (its `input_tokens` includes cached tokens, so the provider subtracts them).
 - Cancellation: `AgentLoop::run_turn` takes a `CancellationToken`. Cancelling
   drops the in-flight model request or tool call and returns
   `Ok(StopReason::Cancelled)`; unrun tool calls get an error `tool_result`, the
