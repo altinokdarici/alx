@@ -32,6 +32,9 @@ history if you need it as a reference.
   and comes back as a `ToolUse`; alx's loop runs it and the next `complete`
   resolves the pending call. The SDK's CLI download at build time is turned
   off in `.cargo/config.toml`.
+- `AnthropicProvider` streams (`stream: true`, SSE) and reassembles the events into
+  one `CompletionResponse`; the loop and CLI still see whole responses (no delta
+  events yet). Dropping the request future closes the connection.
 - `AnthropicProvider` turns on automatic prompt caching (top-level
   `cache_control`) and reports `Usage` (including cache read/write tokens) on
   each response; the agent sums it per turn into `TurnFinished`, and the CLI
