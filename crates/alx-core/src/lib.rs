@@ -41,3 +41,4 @@ pub use tool::{Tool, ToolContext, ToolOutput, ToolRegistry};
 pub use tools::bash::BashTool;
 
 pub use alx_protocol as protocol;
+pub use tokio_util::sync::CancellationToken;

@@ -8,7 +8,8 @@ mod render;
 
 use alx_core::protocol::{Message, StopReason};
 use alx_core::{
-    AgentLoop, FileSessionStore, ProviderKind, Session, SessionStore, SessionSummary, Settings,
+    AgentLoop, CancellationToken, FileSessionStore, ProviderKind, Session, SessionStore,
+    SessionSummary, Settings,
 };
 use clap::Parser;
 use render::{CliRenderer, Style};
@@ -87,6 +88,7 @@ fn exit_code_for(reason: &StopReason) -> u8 {
         StopReason::StopSequence => 3,
         StopReason::Refusal => 4,
         StopReason::PauseTurn => 5,
+        StopReason::Cancelled => 130,
         StopReason::ToolUse | StopReason::Other(_) => 1,
     }
 }
@@ -160,7 +162,16 @@ async fn run() -> anyhow::Result<u8> {
     loop {
         print!("{}", render::prompt(&style));
         std::io::stdout().flush()?;
-        let Some(line) = lines.next_line().await? else {
+        // Ctrl-C at the prompt exits (it is handled, not default-killed,
+        // because the turn below installs a signal handler).
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                return Ok(130);
+            }
+        };
+        let Some(line) = line else {
             break;
         }; // EOF
         let input = line.trim();
@@ -171,10 +182,26 @@ async fn run() -> anyhow::Result<u8> {
             continue;
         }
 
-        let stop = match agent
-            .run_turn(&mut session, Message::user_text(input), &renderer)
-            .await
-        {
+        // Ctrl-C cancels the running turn; a second one gives up waiting
+        // for it to wind down and exits.
+        let cancel = CancellationToken::new();
+        let result = {
+            let turn = agent.run_turn(&mut session, Message::user_text(input), &renderer, &cancel);
+            tokio::pin!(turn);
+            loop {
+                tokio::select! {
+                    result = &mut turn => break result,
+                    _ = tokio::signal::ctrl_c() => {
+                        if cancel.is_cancelled() {
+                            println!();
+                            return Ok(130);
+                        }
+                        cancel.cancel();
+                    }
+                }
+            }
+        };
+        let stop = match result {
             Ok(stop) => stop,
             Err(e) => {
                 // The session was rolled back, so the user can just try again.
@@ -184,6 +211,10 @@ async fn run() -> anyhow::Result<u8> {
         };
         store.save(&session).await?;
 
+        // The turn was cancelled, which is not a reason to leave the REPL.
+        if stop == StopReason::Cancelled {
+            continue;
+        }
         if stop != StopReason::EndTurn {
             let code = exit_code_for(&stop);
             eprintln!("Unexpected stop_reason \"{stop}\", exiting with code {code}");

@@ -3,10 +3,11 @@
 use crate::event::EventSink;
 use crate::provider::{CompletionRequest, Provider};
 use crate::session::Session;
-use crate::tool::{ToolContext, ToolRegistry};
+use crate::tool::{ToolContext, ToolOutput, ToolRegistry};
 use alx_protocol::{ContentBlock, Event, Message, Role, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
@@ -15,11 +16,17 @@ pub trait AgentLoop: Send + Sync {
     ///
     /// On error the session is rolled back to how it was before the call,
     /// so the caller can retry or carry on.
+    ///
+    /// Cancelling `cancel` stops the turn as soon as possible: a running
+    /// model request or tool call is dropped (killing its process), and the
+    /// result is `Ok(StopReason::Cancelled)`. Work done so far stays in the
+    /// session, which is left in a valid state to continue from.
     async fn run_turn(
         &self,
         session: &mut Session,
         input: Message,
         events: &dyn EventSink,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<StopReason>;
 }
 
@@ -55,18 +62,21 @@ impl SingleAgent {
         events: &dyn EventSink,
         model: &mut Option<String>,
         usage: &mut Option<Usage>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<StopReason> {
         loop {
             events.emit(Event::ModelRequest);
-            let resp = self
-                .provider
-                .complete(CompletionRequest {
-                    system: self.config.system_prompt.clone(),
-                    messages: session.messages.clone(),
-                    tools: self.tools.specs(),
-                    max_tokens: self.config.max_tokens,
-                })
-                .await?;
+            let request = self.provider.complete(CompletionRequest {
+                system: self.config.system_prompt.clone(),
+                messages: session.messages.clone(),
+                tools: self.tools.specs(),
+                max_tokens: self.config.max_tokens,
+            });
+            let resp = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(mark_cancelled(session)),
+                resp = request => resp?,
+            };
             if resp.model.is_some() {
                 model.clone_from(&resp.model);
             }
@@ -93,13 +103,31 @@ impl SingleAgent {
 
             // All tool results go in a single user message after the assistant turn.
             let mut results = Vec::with_capacity(tool_calls.len());
+            let mut cancelled = false;
             for (id, name, input) in tool_calls {
+                if cancelled {
+                    // Every tool_use still needs a tool_result.
+                    results.push(ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content: "Not executed: cancelled by user.".into(),
+                        is_error: true,
+                    });
+                    continue;
+                }
                 events.emit(Event::ToolCallStarted {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
                 });
-                let out = self.tools.call(&name, input, &self.tool_ctx).await;
+                let call = self.tools.call(&name, input, &self.tool_ctx);
+                let out = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        cancelled = true;
+                        ToolOutput::error("Cancelled by user.")
+                    }
+                    out = call => out,
+                };
                 events.emit(Event::ToolCallFinished {
                     id: id.clone(),
                     name,
@@ -116,8 +144,23 @@ impl SingleAgent {
                 role: Role::User,
                 content: results,
             });
+            if cancelled {
+                return Ok(mark_cancelled(session));
+            }
         }
     }
+}
+
+/// Ends a cancelled turn with an assistant message, so the history keeps
+/// alternating user/assistant and the next user message follows cleanly.
+fn mark_cancelled(session: &mut Session) -> StopReason {
+    session.messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "[Cancelled by user]".into(),
+        }],
+    });
+    StopReason::Cancelled
 }
 
 #[async_trait]
@@ -127,6 +170,7 @@ impl AgentLoop for SingleAgent {
         session: &mut Session,
         input: Message,
         events: &dyn EventSink,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<StopReason> {
         let checkpoint = session.messages.len();
         session.messages.push(input);
@@ -134,7 +178,7 @@ impl AgentLoop for SingleAgent {
         let mut model = None;
         let mut usage = None;
         match self
-            .turn_inner(session, events, &mut model, &mut usage)
+            .turn_inner(session, events, &mut model, &mut usage, cancel)
             .await
         {
             Ok(stop_reason) => {
@@ -211,6 +255,7 @@ mod tests {
                 stdout: "fake\n".into(),
                 stderr: String::new(),
                 exit_code: Some(0),
+                timed_out: false,
             })
         }
     }
@@ -223,7 +268,7 @@ mod tests {
         }
     }
 
-    fn agent(provider: Arc<ScriptedProvider>, exec: Arc<FakeExecutor>) -> SingleAgent {
+    fn agent(provider: Arc<dyn Provider>, exec: Arc<dyn Executor>) -> SingleAgent {
         SingleAgent {
             config: AgentConfig::default(),
             provider,
@@ -280,7 +325,12 @@ mod tests {
         let mut session = Session::new("s");
 
         let stop = agent
-            .run_turn(&mut session, Message::user_text("hi"), &sink)
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &sink,
+                &CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -322,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn rolls_back_session_on_provider_error() {
         let provider = Arc::new(ScriptedProvider::new(vec![Err(anyhow::anyhow!("boom"))]));
-        let agent = agent(provider, Arc::default());
+        let agent = agent(provider, Arc::new(FakeExecutor::default()));
         let mut session = Session::new("s");
         session.messages.push(Message::user_text("earlier"));
 
@@ -331,10 +381,131 @@ mod tests {
                 &mut session,
                 Message::user_text("hi"),
                 &crate::event::NullSink,
+                &CancellationToken::new(),
             )
             .await;
 
         assert!(res.is_err());
         assert_eq!(session.messages, vec![Message::user_text("earlier")]);
+    }
+
+    /// Never finishes, so a turn can only end by being cancelled.
+    struct HangingExecutor;
+
+    #[async_trait]
+    impl Executor for HangingExecutor {
+        async fn run(&self, _req: ExecRequest) -> std::io::Result<ExecOutput> {
+            std::future::pending().await
+        }
+    }
+
+    struct HangingProvider;
+
+    #[async_trait]
+    impl Provider for HangingProvider {
+        fn info(&self) -> alx_protocol::ProviderInfo {
+            alx_protocol::ProviderInfo {
+                name: "hanging".into(),
+                model: None,
+            }
+        }
+
+        async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+            std::future::pending().await
+        }
+    }
+
+    fn cancel_soon(token: &CancellationToken) {
+        let token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            token.cancel();
+        });
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_tool_call_keeps_history_valid() {
+        let call = |id: &str| ContentBlock::ToolUse {
+            id: id.into(),
+            name: "bash".into(),
+            input: json!({"input": "sleep 100"}),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![Ok(CompletionResponse {
+            content: vec![call("t1"), call("t2")],
+            stop_reason: StopReason::ToolUse,
+            model: None,
+            usage: None,
+        })]));
+        let mut agent = agent(provider, Arc::new(FakeExecutor::default()));
+        agent.tool_ctx.executor = Arc::new(HangingExecutor);
+        let sink = VecSink::default();
+        let mut session = Session::new("s");
+        let cancel = CancellationToken::new();
+        cancel_soon(&cancel);
+
+        let stop = agent
+            .run_turn(&mut session, Message::user_text("hi"), &sink, &cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(stop, StopReason::Cancelled);
+        // user, assistant(tool_use x2), user(tool_results x2), assistant(cancelled)
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[3].role, Role::Assistant);
+        let results = &session.messages[2].content;
+        assert_eq!(results.len(), 2);
+        for (r, expected) in results
+            .iter()
+            .zip(["Cancelled by user.", "Not executed: cancelled by user."])
+        {
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = r
+            else {
+                panic!("expected tool result");
+            };
+            assert!(*is_error);
+            assert_eq!(content, expected);
+        }
+        // Only the call that actually started is reported as started.
+        let events = sink.0.lock().unwrap();
+        let started = events
+            .iter()
+            .filter(|e| matches!(e, Event::ToolCallStarted { .. }))
+            .count();
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, Event::ToolCallFinished { .. }))
+            .count();
+        assert_eq!((started, finished), (1, 1));
+        assert!(matches!(
+            events.last(),
+            Some(Event::TurnFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_model_request_ends_the_turn() {
+        let agent = agent(Arc::new(HangingProvider), Arc::new(FakeExecutor::default()));
+        let mut session = Session::new("s");
+        let cancel = CancellationToken::new();
+        cancel_soon(&cancel);
+
+        let stop = agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &crate::event::NullSink,
+                &cancel,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stop, StopReason::Cancelled);
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[1].role, Role::Assistant);
     }
 }

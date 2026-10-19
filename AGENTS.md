@@ -37,6 +37,15 @@ history if you need it as a reference.
   each response; the agent sums it per turn into `TurnFinished`, and the CLI
   prints a `tokens:` line. Keep the prompt prefix (tools, system, history)
   byte-stable between requests or the cache misses. Copilot reports no usage.
+- Cancellation: `AgentLoop::run_turn` takes a `CancellationToken`. Cancelling
+  drops the in-flight model request or tool call and returns
+  `Ok(StopReason::Cancelled)`; unrun tool calls get an error `tool_result`, the
+  turn ends with an assistant `[Cancelled by user]` message, so the session stays
+  valid. `Executor::run` must stop its process when its future is dropped;
+  `LocalExecutor` kills the whole process group. `ExecRequest::timeout` does the
+  same on a deadline (`ExecOutput::timed_out`). `BashTool` defaults to 120s, the
+  model can pass `timeout_seconds` (max 1800). The CLI cancels on Ctrl-C, and a
+  second Ctrl-C exits. Copilot's pending-call state after a cancel is untested.
 - `./AGENTS.md` in the working directory, if present, is appended to the system
   prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
 - Sessions are saved after every turn by `FileSessionStore` (one JSONL file per

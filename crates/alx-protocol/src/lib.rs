@@ -59,6 +59,8 @@ pub enum StopReason {
     StopSequence,
     Refusal,
     PauseTurn,
+    /// The user cancelled the turn. Never sent by a provider.
+    Cancelled,
     Other(String),
 }
 
@@ -71,6 +73,7 @@ impl From<String> for StopReason {
             "stop_sequence" => Self::StopSequence,
             "refusal" => Self::Refusal,
             "pause_turn" => Self::PauseTurn,
+            "cancelled" => Self::Cancelled,
             _ => Self::Other(s),
         }
     }
@@ -91,6 +94,7 @@ impl StopReason {
             Self::StopSequence => "stop_sequence",
             Self::Refusal => "refusal",
             Self::PauseTurn => "pause_turn",
+            Self::Cancelled => "cancelled",
             Self::Other(s) => s,
         }
     }
@@ -188,7 +192,13 @@ mod tests {
 
     #[test]
     fn stop_reason_round_trips_including_unknown() {
-        for s in ["end_turn", "tool_use", "pause_turn", "something_new"] {
+        for s in [
+            "end_turn",
+            "tool_use",
+            "pause_turn",
+            "cancelled",
+            "something_new",
+        ] {
             let r: StopReason = serde_json::from_value(json!(s)).unwrap();
             assert_eq!(serde_json::to_value(&r).unwrap(), json!(s));
         }

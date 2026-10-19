@@ -190,8 +190,15 @@ impl Renderer {
                 st.open_call = false;
                 Some(self.finished(output, *is_error))
             }
-            Event::TurnFinished { model, usage, .. } => {
+            Event::TurnFinished {
+                model,
+                usage,
+                stop_reason,
+            } => {
                 let mut lines = Vec::new();
+                if *stop_reason == alx_core::protocol::StopReason::Cancelled {
+                    lines.push("cancelled".to_owned());
+                }
                 if let Some(model) = model
                     && st.last_model.as_deref() != Some(model)
                 {
