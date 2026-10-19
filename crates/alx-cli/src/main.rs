@@ -47,6 +47,10 @@ struct Cli {
     /// List stored sessions and exit.
     #[arg(long)]
     list_sessions: bool,
+    /// Serve the Agent Client Protocol on stdin/stdout instead of starting
+    /// the REPL, so an editor can drive the agent.
+    #[arg(long, conflicts_with_all = ["continue_last", "resume", "list_sessions"])]
+    acp: bool,
 }
 
 /// Formats a Unix timestamp as UTC `YYYY-MM-DD HH:MM`.
@@ -140,6 +144,17 @@ async fn run() -> anyhow::Result<u8> {
         None
     };
     let agent = alx_core::agent_from_settings(&settings)?;
+    if cli.acp {
+        // stdout carries the protocol, so nothing else may print to it.
+        alx_acp::serve(
+            std::sync::Arc::new(agent),
+            std::sync::Arc::new(store),
+            agent_client_protocol::Stdio::new(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(0);
+    }
     let info = agent.provider.info();
     let style = Style::detect();
     println!(

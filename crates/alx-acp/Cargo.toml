@@ -1,0 +1,17 @@
+[package]
+name = "alx-acp"
+description = "Serves an alx agent over the Agent Client Protocol (ACP)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alx-core.workspace = true
+agent-client-protocol = { workspace = true, features = ["stdio"] }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true

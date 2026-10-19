@@ -74,11 +74,20 @@ history if you need it as a reference.
   session started in the current directory, `--resume <id>` a specific one,
   `--list-sessions` lists them. Copilot keeps provider-side state that is not
   restored on resume; only the message history is.
+- ACP (Agent Client Protocol): `alx-acp` serves any `AgentLoop` + `SessionStore`
+  over ACP (`alx_acp::serve(agent, store, transport)`), using the
+  `agent-client-protocol` SDK. The transport is anything that implements the
+  SDK's `ConnectTo`: `Stdio` for `alx --acp` (editors), or `Channel::duplex()`
+  for a client in the same process (see `crates/alx-acp/tests/in_process.rs`).
+  `Event`s map to `session/update` (text deltas, tool calls, context usage);
+  `session/cancel` cancels the turn's token; `session/load` replays history.
+  Not mapped yet: `Compacted`, token `Usage`, permission requests, client fs/terminal.
 - v1 scope: single agent, local execution, no MCP.
 
 ## Layout
 
 - `crates/alx-protocol`: wire types shared by core and clients (messages, tool specs, events)
+- `crates/alx-acp`: ACP server over `alx-core` (see above)
 - `crates/alx-core`: agent loop, traits, built-in implementations, and
   `agent_from_env` / `load_dotenv`, the default wiring for binaries
 - `crates/alx-cli`: the `alx` binary, an interactive REPL with line editing and history (`rustyline`: arrows, Home/End, Up/Down);

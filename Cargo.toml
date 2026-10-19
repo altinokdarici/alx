@@ -10,6 +10,8 @@ license = "MIT"
 [workspace.dependencies]
 alx-protocol = { path = "crates/alx-protocol" }
 alx-core = { path = "crates/alx-core" }
+alx-acp = { path = "crates/alx-acp" }
+agent-client-protocol = "3.4"
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
