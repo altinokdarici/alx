@@ -40,6 +40,26 @@ pub trait Tool: Send + Sync {
     /// Invalid input should come back as an error `ToolOutput` (for the
     /// model to see), not as a panic.
     async fn call(&self, input: Value, ctx: &ToolContext) -> ToolOutput;
+
+    /// Whether the tool only reads. Read-only tools run without asking a
+    /// [`ToolApprover`].
+    fn read_only(&self) -> bool {
+        false
+    }
+}
+
+/// The answer to a request to run a tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Allow,
+    Deny,
+}
+
+/// Decides whether a tool call may run, e.g. by asking the user. The agent
+/// asks it before every call to a tool that is not [`Tool::read_only`].
+#[async_trait]
+pub trait ToolApprover: Send + Sync {
+    async fn approve(&self, id: &str, name: &str, input: &Value) -> Approval;
 }
 
 /// The set of tools offered to the model, keyed by name.
@@ -65,6 +85,11 @@ impl ToolRegistry {
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.values().map(|t| t.spec()).collect()
+    }
+
+    /// Whether `name` is a known read-only tool.
+    pub fn is_read_only(&self, name: &str) -> bool {
+        self.tools.get(name).is_some_and(|t| t.read_only())
     }
 
     pub async fn call(&self, name: &str, input: Value, ctx: &ToolContext) -> ToolOutput {

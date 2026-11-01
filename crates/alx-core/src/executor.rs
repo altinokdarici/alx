@@ -1,7 +1,7 @@
 //! Where commands run. Local for now; Docker or remote later.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,6 +37,20 @@ pub trait Executor: Send + Sync {
     /// Dropping the returned future (e.g. on cancellation) must stop the
     /// process.
     async fn run(&self, req: ExecRequest) -> std::io::Result<ExecOutput>;
+
+    /// Read a UTF-8 text file. The default reads the host's file system.
+    async fn read_file(&self, path: &Path) -> std::io::Result<String> {
+        tokio::fs::read_to_string(path).await
+    }
+
+    /// Write a text file, creating it and its parent directories if needed.
+    /// The default writes to the host's file system.
+    async fn write_file(&self, path: &Path, content: &str) -> std::io::Result<()> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        tokio::fs::write(path, content).await
+    }
 }
 
 /// Runs processes on the host machine.

@@ -14,7 +14,7 @@ history if you need it as a reference.
   | Layer        | Trait          | Built-in               |
   |--------------|----------------|------------------------|
   | LLM backend  | `Provider`     | `AnthropicProvider`, `CopilotProvider` |
-  | Tools        | `Tool`         | `BashTool`             |
+  | Tools        | `Tool`         | `BashTool`, `ReadFileTool`, `WriteFileTool` |
   | Where commands run | `Executor` | `LocalExecutor` (Docker/remote later) |
   | Agent loop   | `AgentLoop`    | `SingleAgent` (multi-agent later) |
   | Persistence  | `SessionStore` | `FileSessionStore`, `InMemorySessionStore` |
@@ -81,7 +81,14 @@ history if you need it as a reference.
   for a client in the same process (see `crates/alx-acp/tests/in_process.rs`).
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history.
-  Not mapped yet: `Compacted`, token `Usage`, permission requests, client fs/terminal.
+  `Compacted` becomes a `compaction_update`; turn `Usage` goes in
+  `PromptResponse.usage` (unstable SDK feature). A `/compact` prompt (advertised
+  via `available_commands_update`) runs `AgentLoop::compact`. Each turn runs
+  through `AgentLoop::run_turn_with(.., TurnOptions)`: the ACP server passes a
+  `ClientExecutor` (client terminal / fs when the client advertises them, else
+  local) and a `ClientApprover` (`session/request_permission` before every
+  non-`read_only` tool; "always" answers remembered per tool name). The CLI
+  passes no approver, so tools run unasked there.
 - v1 scope: single agent, local execution, no MCP.
 
 ## Layout

@@ -3,13 +3,13 @@
 
 use crate::{
     AgentConfig, AnthropicConfig, AnthropicProvider, BashTool, LocalExecutor, Provider,
-    ProviderKind, Settings, SingleAgent, ToolContext, ToolRegistry,
+    ProviderKind, ReadFileTool, Settings, SingleAgent, ToolContext, ToolRegistry, WriteFileTool,
 };
 use anyhow::Context;
 use std::sync::Arc;
 
-/// Default agent: the provider from [`provider_from_settings`], bash tool,
-/// local executor.
+/// Default agent: the provider from [`provider_from_settings`], the bash,
+/// read_file and write_file tools, local executor.
 ///
 /// Swap any part here: another `Provider`, `Executor` (Docker, remote, ...),
 /// more tools, or a different `AgentLoop` entirely.
@@ -21,7 +21,10 @@ pub fn agent_from_settings(settings: &Settings) -> anyhow::Result<SingleAgent> {
     Ok(SingleAgent {
         config,
         provider: provider_from_settings(settings)?,
-        tools: ToolRegistry::new().with(BashTool),
+        tools: ToolRegistry::new()
+            .with(BashTool)
+            .with(ReadFileTool)
+            .with(WriteFileTool),
         tool_ctx: ToolContext {
             executor: Arc::new(LocalExecutor),
         },

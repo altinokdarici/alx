@@ -108,8 +108,10 @@ fn width() -> usize {
 
 /// The one-line description of a tool call, e.g. `ls -la` (+2 lines).
 fn call_summary(name: &str, input: &serde_json::Value) -> String {
-    let detail = match input.get("input").and_then(|v| v.as_str()) {
-        Some(script) if name == "bash" => script.to_owned(),
+    let arg = |key: &str| input.get(key).and_then(|v| v.as_str());
+    let detail = match (name, arg("input"), arg("path")) {
+        ("bash", Some(script), _) => script.to_owned(),
+        ("read_file" | "write_file", _, Some(path)) => path.to_owned(),
         _ => input.to_string(),
     };
     let mut lines = detail.lines().filter(|l| !l.trim().is_empty());

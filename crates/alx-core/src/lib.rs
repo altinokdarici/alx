@@ -5,7 +5,7 @@
 //! | Layer          | Trait            | Built-in                       |
 //! |----------------|------------------|--------------------------------|
 //! | LLM backend    | [`Provider`]     | [`AnthropicProvider`], `CopilotProvider` |
-//! | Tools          | [`Tool`]         | [`BashTool`]                   |
+//! | Tools          | [`Tool`]         | [`BashTool`], [`ReadFileTool`], [`WriteFileTool`] |
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
 //! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`], [`FileSessionStore`] |
@@ -24,7 +24,7 @@ pub mod settings;
 pub mod tool;
 pub mod tools;
 
-pub use agent::{AgentConfig, AgentLoop, SingleAgent};
+pub use agent::{AgentConfig, AgentLoop, SingleAgent, TurnOptions};
 pub use env::{agent_from_settings, load_dotenv, provider_from_settings};
 pub use event::EventSink;
 pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};
@@ -37,8 +37,9 @@ pub use session::{
     default_session_dir,
 };
 pub use settings::{AnthropicSettings, CopilotSettings, ProviderKind, Settings};
-pub use tool::{Tool, ToolContext, ToolOutput, ToolRegistry};
+pub use tool::{Approval, Tool, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
 pub use tools::bash::BashTool;
+pub use tools::files::{ReadFileTool, WriteFileTool};
 
 pub use alx_protocol as protocol;
 pub use tokio_util::sync::CancellationToken;

@@ -1,9 +1,10 @@
 //! The agent loop: drives provider <-> tools until the model ends its turn.
 
 use crate::event::EventSink;
+use crate::executor::Executor;
 use crate::provider::{CompletionRequest, Provider};
 use crate::session::Session;
-use crate::tool::{ToolContext, ToolOutput, ToolRegistry};
+use crate::tool::{Approval, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
 use alx_protocol::{ContentBlock, Event, Message, Role, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -27,12 +28,36 @@ pub trait AgentLoop: Send + Sync {
         input: Message,
         events: &dyn EventSink,
         cancel: &CancellationToken,
+    ) -> anyhow::Result<StopReason> {
+        self.run_turn_with(session, input, events, cancel, &TurnOptions::default())
+            .await
+    }
+
+    /// [`run_turn`](Self::run_turn) with per-turn overrides, e.g. from a
+    /// client that runs commands itself or approves tool calls.
+    async fn run_turn_with(
+        &self,
+        session: &mut Session,
+        input: Message,
+        events: &dyn EventSink,
+        cancel: &CancellationToken,
+        options: &TurnOptions,
     ) -> anyhow::Result<StopReason>;
 
     /// Compact the provider's view of the conversation now. Emits
     /// [`Event::Compacted`] when something was compacted and returns whether
     /// it was. Errors if the provider can't compact.
     async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool>;
+}
+
+/// Per-turn overrides for [`AgentLoop::run_turn_with`].
+#[derive(Clone, Default)]
+pub struct TurnOptions {
+    /// Run this turn's tools here instead of the agent's own executor.
+    pub executor: Option<Arc<dyn Executor>>,
+    /// Ask this before each call to a tool that is not read-only. `None`
+    /// runs every call.
+    pub approver: Option<Arc<dyn ToolApprover>>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +93,14 @@ impl SingleAgent {
         model: &mut Option<String>,
         usage: &mut Option<Usage>,
         cancel: &CancellationToken,
+        options: &TurnOptions,
     ) -> anyhow::Result<StopReason> {
+        let tool_ctx = match &options.executor {
+            Some(executor) => ToolContext {
+                executor: executor.clone(),
+            },
+            None => self.tool_ctx.clone(),
+        };
         loop {
             events.emit(Event::ModelRequest);
             let on_text = |text: &str| events.emit(Event::AssistantTextDelta { text: text.into() });
@@ -135,14 +167,25 @@ impl SingleAgent {
                     name: name.clone(),
                     input: input.clone(),
                 });
-                let call = self.tools.call(&name, input, &self.tool_ctx);
+                let approver = options
+                    .approver
+                    .as_ref()
+                    .filter(|_| !self.tools.is_read_only(&name));
+                let run = async {
+                    if let Some(approver) = approver
+                        && approver.approve(&id, &name, &input).await == Approval::Deny
+                    {
+                        return ToolOutput::error("The user denied permission to run this tool.");
+                    }
+                    self.tools.call(&name, input, &tool_ctx).await
+                };
                 let out = tokio::select! {
                     biased;
                     () = cancel.cancelled() => {
                         cancelled = true;
                         ToolOutput::error("Cancelled by user.")
                     }
-                    out = call => out,
+                    out = run => out,
                 };
                 events.emit(Event::ToolCallFinished {
                     id: id.clone(),
@@ -189,12 +232,13 @@ impl AgentLoop for SingleAgent {
         Ok(compaction.is_some())
     }
 
-    async fn run_turn(
+    async fn run_turn_with(
         &self,
         session: &mut Session,
         input: Message,
         events: &dyn EventSink,
         cancel: &CancellationToken,
+        options: &TurnOptions,
     ) -> anyhow::Result<StopReason> {
         let checkpoint = session.messages.len();
         session.messages.push(input);
@@ -202,7 +246,7 @@ impl AgentLoop for SingleAgent {
         let mut model = None;
         let mut usage = None;
         match self
-            .turn_inner(session, events, &mut model, &mut usage, cancel)
+            .turn_inner(session, events, &mut model, &mut usage, cancel, options)
             .await
         {
             Ok(stop_reason) => {
@@ -643,5 +687,93 @@ mod tests {
         assert_eq!(stop, StopReason::Cancelled);
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[1].role, Role::Assistant);
+    }
+
+    fn reply(
+        content: Vec<ContentBlock>,
+        stop_reason: StopReason,
+    ) -> anyhow::Result<CompletionResponse> {
+        Ok(CompletionResponse {
+            content,
+            stop_reason,
+            model: None,
+            usage: None,
+            context: None,
+            compactions: Vec::new(),
+        })
+    }
+
+    /// Approves calls whose input says `"ok": true`, and records what it was asked.
+    #[derive(Default)]
+    struct InputApprover(Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl ToolApprover for InputApprover {
+        async fn approve(&self, id: &str, _name: &str, input: &serde_json::Value) -> Approval {
+            self.0.lock().unwrap().push(id.into());
+            if input["ok"] == true {
+                Approval::Allow
+            } else {
+                Approval::Deny
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn approver_gates_tools_that_are_not_read_only() {
+        let call = |id: &str, name: &str, input: serde_json::Value| ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            reply(
+                vec![
+                    call("t1", "bash", json!({"input": "yes", "ok": true})),
+                    call("t2", "bash", json!({"input": "no"})),
+                    call("t3", "read_file", json!({"path": "/definitely/not/here"})),
+                ],
+                StopReason::ToolUse,
+            ),
+            reply(vec![text("done")], StopReason::EndTurn),
+        ]));
+        let default_exec = Arc::new(FakeExecutor::default());
+        let mut agent = agent(provider, default_exec.clone());
+        agent
+            .tools
+            .register(Arc::new(crate::tools::files::ReadFileTool));
+        let turn_exec = Arc::new(FakeExecutor::default());
+        let approver = Arc::new(InputApprover::default());
+        let options = TurnOptions {
+            executor: Some(turn_exec.clone()),
+            approver: Some(approver.clone()),
+        };
+        let mut session = Session::new("s");
+
+        agent
+            .run_turn_with(
+                &mut session,
+                Message::user_text("hi"),
+                &VecSink::default(),
+                &CancellationToken::new(),
+                &options,
+            )
+            .await
+            .unwrap();
+
+        // read_file is read-only, so only the bash calls were asked about.
+        assert_eq!(*approver.0.lock().unwrap(), ["t1", "t2"]);
+        // Only the approved call ran, on the turn's executor.
+        assert_eq!(*turn_exec.ran.lock().unwrap(), ["yes"]);
+        assert!(default_exec.ran.lock().unwrap().is_empty());
+        let results = &session.messages[2].content;
+        let ContentBlock::ToolResult {
+            is_error, content, ..
+        } = &results[1]
+        else {
+            panic!("expected tool result");
+        };
+        assert!(*is_error);
+        assert!(content.contains("denied"), "{content}");
     }
 }
