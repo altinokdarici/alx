@@ -1,23 +1,34 @@
 //! alx dev CLI: a line-based REPL.
 //!
 //! This is just one client of the core. The agent itself is wired up in
-//! `alx_core::agent_from_settings`; this crate only reads input and renders core
-//! events in `CliRenderer`.
+//! `alx_core::agent_from_settings` and served over ACP by `alx-acp` on its
+//! in-process (native) transport; this crate is an ACP client that reads
+//! input and renders the updates in `CliRenderer`.
 
+mod client;
 mod markdown;
 mod render;
 
-use alx_core::protocol::{Message, StopReason};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest,
+    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionId, SessionNotification, TextContent,
+};
+use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo};
+use alx_core::protocol::{Event, StopReason};
 use alx_core::{
-    AgentLoop, CancellationToken, FileSessionStore, ProviderKind, Session, SessionStore,
-    SessionSummary, Settings,
+    EventSink, FileSessionStore, ProviderKind, Session, SessionStore, SessionSummary, Settings,
 };
 use clap::Parser;
+use client::{CompactOutcome, Translator};
 use render::{CliRenderer, Style};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Command-line flags: the highest-precedence settings layer.
 #[derive(Parser)]
@@ -144,15 +155,12 @@ async fn run() -> anyhow::Result<u8> {
         None
     };
     let agent = alx_core::agent_from_settings(&settings)?;
+    let store: Arc<dyn SessionStore> = Arc::new(store);
     if cli.acp {
         // stdout carries the protocol, so nothing else may print to it.
-        alx_acp::serve(
-            std::sync::Arc::new(agent),
-            std::sync::Arc::new(store),
-            agent_client_protocol::Stdio::new(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        alx_acp::serve_stdio(Arc::new(agent), store)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         return Ok(0);
     }
     let info = agent.provider.info();
@@ -161,98 +169,211 @@ async fn run() -> anyhow::Result<u8> {
         "{}",
         render::banner(&style, &info.name, info.model.as_deref())
     );
-    let renderer = CliRenderer::new(style, cli.verbose);
-    let mut session = match resumed {
-        Some(s) => {
-            println!("Resumed session {} ({} messages)", s.id, s.messages.len());
-            s
-        }
-        None => {
-            let mut s = Session::new(Session::generate_id());
-            s.cwd = cwd;
-            s
-        }
+    let transport = alx_acp::native(Arc::new(agent), store);
+    let repl = Repl {
+        style,
+        renderer: Arc::new(CliRenderer::new(style, cli.verbose)),
+        translator: Arc::default(),
+        replaying: Arc::default(),
+        compacted: Arc::default(),
     };
-    // Line editing (arrows, Home/End, Up/Down history). It reads stdin in
-    // the terminal's raw mode only while waiting at the prompt, so Ctrl-C
-    // during a turn still arrives as a signal. Piped input is read plainly.
-    let mut editor = Some(DefaultEditor::new()?);
+    repl.run(transport, resumed, cwd).await
+}
 
-    loop {
-        let prompt = render::prompt(&style);
-        let mut rl = editor.take().expect("editor is put back after each read");
-        let (rl, read) = tokio::task::spawn_blocking(move || {
-            let read = rl.readline(&prompt);
-            (rl, read)
-        })
-        .await?;
-        editor = Some(rl);
-        let line = match read {
-            Ok(line) => line,
-            Err(ReadlineError::Eof) => break,
-            // Ctrl-C at the prompt exits.
-            Err(ReadlineError::Interrupted) => return Ok(130),
-            Err(e) => return Err(e.into()),
-        };
-        let input = line.trim();
-        if !input.is_empty()
-            && let Some(rl) = editor.as_mut()
-        {
-            let _ = rl.add_history_entry(input);
-        }
-        if input == "exit" || input == "quit" {
-            break;
-        }
-        if input.is_empty() {
-            continue;
-        }
-        if input == "/compact" {
-            match agent.compact(&renderer).await {
-                Ok(true) => {}
-                Ok(false) => println!("{}", style.dim("Nothing to compact yet.")),
-                Err(e) => eprintln!("{}", render::error_line(&style, &format!("{e:#}"))),
-            }
-            continue;
-        }
+/// The REPL, an ACP client of the agent.
+struct Repl {
+    style: Style,
+    renderer: Arc<CliRenderer>,
+    translator: Arc<Translator>,
+    /// `session/load` is replaying history, which is already on screen.
+    replaying: Arc<AtomicBool>,
+    /// The final word on the running `/compact`.
+    compacted: Arc<Mutex<Option<CompactOutcome>>>,
+}
 
-        // Ctrl-C cancels the running turn; a second one gives up waiting
-        // for it to wind down and exits.
-        let cancel = CancellationToken::new();
-        let result = {
-            let turn = agent.run_turn(&mut session, Message::user_text(input), &renderer, &cancel);
-            tokio::pin!(turn);
-            loop {
-                tokio::select! {
-                    result = &mut turn => break result,
-                    _ = tokio::signal::ctrl_c() => {
-                        if cancel.is_cancelled() {
-                            println!();
-                            return Ok(130);
-                        }
-                        cancel.cancel();
+impl Repl {
+    async fn run(
+        self,
+        transport: impl ConnectTo<Client> + 'static,
+        resumed: Option<Session>,
+        cwd: Option<String>,
+    ) -> anyhow::Result<u8> {
+        let (renderer, translator, replaying, compacted) = (
+            self.renderer.clone(),
+            self.translator.clone(),
+            self.replaying.clone(),
+            self.compacted.clone(),
+        );
+        Client
+            .builder()
+            .on_receive_notification(
+                async move |n: SessionNotification, _cx| {
+                    if replaying.load(Ordering::Relaxed) {
+                        return Ok(());
                     }
-                }
+                    if let Some(outcome) = client::compact_outcome(&n.update) {
+                        *compacted.lock().unwrap() = Some(outcome);
+                    }
+                    for event in translator.events(n.update) {
+                        renderer.emit(event);
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                // The CLI does not ask before running tools (yet).
+                async move |_r: RequestPermissionRequest, responder, _cx| {
+                    responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                            "allow_always",
+                        )),
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
+                Ok(self.session(cx, resumed, cwd).await)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    }
+
+    async fn session(
+        &self,
+        cx: ConnectionTo<Agent>,
+        resumed: Option<Session>,
+        cwd: Option<String>,
+    ) -> anyhow::Result<u8> {
+        let acp = |e: agent_client_protocol::Error| anyhow::anyhow!("{e}");
+        let style = &self.style;
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await
+            .map_err(acp)?;
+        let dir = cwd.map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let session = match resumed {
+            Some(s) => {
+                self.replaying.store(true, Ordering::Relaxed);
+                let loaded = cx
+                    .send_request(LoadSessionRequest::new(s.id.clone(), dir))
+                    .block_task()
+                    .await;
+                self.replaying.store(false, Ordering::Relaxed);
+                loaded.map_err(acp)?;
+                println!("Resumed session {} ({} messages)", s.id, s.messages.len());
+                SessionId::new(s.id)
+            }
+            None => {
+                cx.send_request(NewSessionRequest::new(dir))
+                    .block_task()
+                    .await
+                    .map_err(acp)?
+                    .session_id
             }
         };
-        let stop = match result {
-            Ok(stop) => stop,
-            Err(e) => {
-                // The session was rolled back, so the user can just try again.
-                eprintln!("{}", render::error_line(&style, &format!("{e:#}")));
+        let prompt = |text: &str| {
+            cx.send_request(PromptRequest::new(
+                session.clone(),
+                vec![ContentBlock::Text(TextContent::new(text))],
+            ))
+            .block_task()
+        };
+        // Line editing (arrows, Home/End, Up/Down history). It reads stdin in
+        // the terminal's raw mode only while waiting at the prompt, so Ctrl-C
+        // during a turn still arrives as a signal. Piped input is read plainly.
+        let mut editor = Some(DefaultEditor::new()?);
+
+        loop {
+            let prompt_text = render::prompt(style);
+            let mut rl = editor.take().expect("editor is put back after each read");
+            let (rl, read) = tokio::task::spawn_blocking(move || {
+                let read = rl.readline(&prompt_text);
+                (rl, read)
+            })
+            .await?;
+            editor = Some(rl);
+            let line = match read {
+                Ok(line) => line,
+                Err(ReadlineError::Eof) => break,
+                // Ctrl-C at the prompt exits.
+                Err(ReadlineError::Interrupted) => return Ok(130),
+                Err(e) => return Err(e.into()),
+            };
+            let input = line.trim();
+            if !input.is_empty()
+                && let Some(rl) = editor.as_mut()
+            {
+                let _ = rl.add_history_entry(input);
+            }
+            if input == "exit" || input == "quit" {
+                break;
+            }
+            if input.is_empty() {
                 continue;
             }
-        };
-        store.save(&session).await?;
+            if input == "/compact" {
+                *self.compacted.lock().unwrap() = None;
+                if let Err(e) = prompt(input).await {
+                    eprintln!("{}", render::error_line(style, &e.to_string()));
+                }
+                match self.compacted.lock().unwrap().take() {
+                    Some(CompactOutcome::NothingToDo) => {
+                        println!("{}", style.dim("Nothing to compact yet."))
+                    }
+                    Some(CompactOutcome::Failed(e)) => {
+                        eprintln!("{}", render::error_line(style, &e))
+                    }
+                    Some(CompactOutcome::Compacted) | None => {}
+                }
+                continue;
+            }
 
-        // The turn was cancelled, which is not a reason to leave the REPL.
-        if stop == StopReason::Cancelled {
-            continue;
+            self.renderer.emit(Event::TurnStarted);
+            self.renderer.emit(Event::ModelRequest);
+            // Ctrl-C cancels the running turn; a second one gives up waiting
+            // for it to wind down and exits.
+            let mut cancelled = false;
+            let result = {
+                let turn = prompt(input);
+                tokio::pin!(turn);
+                loop {
+                    tokio::select! {
+                        result = &mut turn => break result,
+                        _ = tokio::signal::ctrl_c() => {
+                            if cancelled {
+                                println!();
+                                return Ok(130);
+                            }
+                            cancelled = true;
+                            cx.send_notification(CancelNotification::new(session.clone()))
+                                .map_err(acp)?;
+                        }
+                    }
+                }
+            };
+            let reply = match result {
+                Ok(reply) => reply,
+                Err(e) => {
+                    // The session was rolled back, so the user can just try again.
+                    eprintln!("{}", render::error_line(style, &e.to_string()));
+                    continue;
+                }
+            };
+            let finished = client::turn_finished(&reply);
+            self.renderer.emit(finished);
+
+            let stop = client::stop_reason(reply.stop_reason);
+            // The turn was cancelled, which is not a reason to leave the REPL.
+            if stop == StopReason::Cancelled {
+                continue;
+            }
+            if stop != StopReason::EndTurn {
+                let code = exit_code_for(&stop);
+                eprintln!("Unexpected stop_reason \"{stop}\", exiting with code {code}");
+                return Ok(code);
+            }
         }
-        if stop != StopReason::EndTurn {
-            let code = exit_code_for(&stop);
-            eprintln!("Unexpected stop_reason \"{stop}\", exiting with code {code}");
-            return Ok(code);
-        }
+        Ok(0)
     }
-    Ok(0)
 }

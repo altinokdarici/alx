@@ -19,6 +19,8 @@ pub struct AcpSink {
     streamed: AtomicBool,
     /// Token usage of the last finished turn, for the `session/prompt` reply.
     usage: Mutex<Option<Usage>>,
+    /// The model that answered the last finished turn.
+    model: Mutex<Option<String>>,
 }
 
 impl AcpSink {
@@ -28,11 +30,16 @@ impl AcpSink {
             session,
             streamed: AtomicBool::new(false),
             usage: Mutex::new(None),
+            model: Mutex::new(None),
         }
     }
 
     pub fn usage(&self) -> Option<Usage> {
         *self.usage.lock().unwrap()
+    }
+
+    pub fn model(&self) -> Option<String> {
+        self.model.lock().unwrap().clone()
     }
 
     pub fn send(&self, update: SessionUpdate) {
@@ -144,7 +151,10 @@ impl EventSink for AcpSink {
                 let id = format!("compaction-{}", NEXT.fetch_add(1, Ordering::Relaxed));
                 self.send(compaction_update(id, &c));
             }
-            Event::TurnFinished { usage, .. } => *self.usage.lock().unwrap() = usage,
+            Event::TurnFinished { usage, model, .. } => {
+                *self.usage.lock().unwrap() = usage;
+                *self.model.lock().unwrap() = model;
+            }
             _ => {}
         }
     }

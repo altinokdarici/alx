@@ -1,4 +1,4 @@
-//! A real ACP client talking to `serve` over an in-process channel.
+//! A real ACP client talking to the server over the native transport.
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -11,7 +11,7 @@ use agent_client_protocol::schema::v1::{
     TerminalOutputResponse, TextContent, ToolCallStatus, ToolKind, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
-use agent_client_protocol::{Agent, Channel, Client, ConnectionTo};
+use agent_client_protocol::{Agent, Client, ConnectionTo};
 use alx_core::protocol::{
     Compaction, ContentBlock as Block, ProviderInfo, StopReason as Stop, Usage,
 };
@@ -100,12 +100,7 @@ async fn run(
             executor: Arc::new(LocalExecutor),
         },
     });
-    let (client_end, agent_end) = Channel::duplex();
-    let server = tokio::spawn(alx_acp::serve(
-        agent,
-        Arc::new(InMemorySessionStore::default()),
-        agent_end,
-    ));
+    let client_end = alx_acp::native(agent, Arc::new(InMemorySessionStore::default()));
 
     let log = Arc::new(Mutex::new(Log::default()));
     let (l1, l2, l3, l4, l5, l6, l7, l8) = (
@@ -220,7 +215,6 @@ async fn run(
         })
         .await
         .unwrap();
-    server.abort();
     let log = std::mem::take(&mut *log.lock().unwrap());
     Run { log, replies }
 }

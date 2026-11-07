@@ -76,9 +76,12 @@ history if you need it as a reference.
   restored on resume; only the message history is.
 - ACP (Agent Client Protocol): `alx-acp` serves any `AgentLoop` + `SessionStore`
   over ACP (`alx_acp::serve(agent, store, transport)`), using the
-  `agent-client-protocol` SDK. The transport is anything that implements the
-  SDK's `ConnectTo`: `Stdio` for `alx --acp` (editors), or `Channel::duplex()`
-  for a client in the same process (see `crates/alx-acp/tests/in_process.rs`).
+  `agent-client-protocol` SDK. It calls the core directly (function calls);
+  ACP is only its outside. `alx_acp::transport` has the ready-made transports:
+  `native(agent, store)` (in-process channel, returns the client end; used by
+  the CLI and `crates/alx-acp/tests/in_process.rs`) and `serve_stdio` for
+  `alx --acp` (editors). HTTP/WebSocket are still to come; any SDK `ConnectTo`
+  works with `serve`. The prompt reply names the model in `_meta.model`.
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history.
   `Compacted` becomes a `compaction_update`; turn `Usage` goes in
@@ -88,7 +91,8 @@ history if you need it as a reference.
   `ClientExecutor` (client terminal / fs when the client advertises them, else
   local) and a `ClientApprover` (`session/request_permission` before every
   non-`read_only` tool; "always" answers remembered per tool name). The CLI
-  passes no approver, so tools run unasked there.
+  answers every permission request with `allow_always`, so tools run unasked
+  there.
 - v1 scope: single agent, local execution, no MCP.
 
 ## Layout
@@ -100,8 +104,10 @@ history if you need it as a reference.
 - `crates/alx-cli`: the `alx` binary, an interactive REPL with line editing and history (`rustyline`: arrows, Home/End, Up/Down);
   `markdown.rs` renders assistant text (Markdown via `pulldown-cmark`) as ANSI-styled terminal text, word-wrapped to the terminal width (tables shrink and wrap cells), plain when color is off;
   `render.rs` formats events compactly (one line per tool call, full output with `--verbose`; ANSI color on a TTY, off with `NO_COLOR`)
-- `alx-cli` calls `alx-core` directly, in-process. A headless server and the
-  transport clients use to reach it are still to be designed.
+- `alx-cli` is an ACP client: it reaches the agent through `alx-acp`'s native
+  transport, and `client.rs` turns `session/update`s back into `Event`s for the
+  renderer. It still builds the agent (`agent_from_settings`) and reads the
+  session store directly for `--list-sessions` / `--continue`.
 
 ## Working on it
 

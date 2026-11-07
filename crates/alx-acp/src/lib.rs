@@ -1,8 +1,8 @@
 //! Serves an alx agent over the Agent Client Protocol (ACP).
 //!
 //! [`serve`] runs the agent side of an ACP connection on any transport the
-//! SDK can connect to: stdio for an editor, or an in-process
-//! `Channel::duplex()` pair for a client in the same process. The agent and
+//! SDK can connect to; [`transport`] has the ready-made ones (native
+//! in-process, stdio). The agent and
 //! the session store are the ones from `alx-core`; this crate only translates
 //! between ACP messages and alx's `Event`s.
 //!
@@ -13,11 +13,17 @@
 
 mod client_env;
 mod events;
+pub mod transport;
+
+pub use transport::{native, serve_stdio};
+
+/// `_meta` key of a `session/prompt` reply that names the model that answered.
+pub const MODEL_META: &str = "model";
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
     ClientCapabilities, CompactionStatus, CompactionUpdate, ContentBlock, Implementation,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta,
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
     SessionNotification, SessionUpdate, StopReason, Usage as AcpUsage,
 };
@@ -268,6 +274,11 @@ pub async fn serve(
                                 let mut reply = PromptResponse::new(stop_reason(&reason));
                                 if let Some(u) = sink.usage() {
                                     reply = reply.usage(acp_usage(&u));
+                                }
+                                if let Some(model) = sink.model() {
+                                    let mut meta = Meta::new();
+                                    meta.insert(MODEL_META.into(), model.into());
+                                    reply = reply.meta(meta);
                                 }
                                 responder.respond(reply)
                             }
