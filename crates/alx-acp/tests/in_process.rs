@@ -16,8 +16,9 @@ use alx_core::protocol::{
     Compaction, ContentBlock as Block, ProviderInfo, StopReason as Stop, Usage,
 };
 use alx_core::{
-    AgentConfig, BashTool, CompletionRequest, CompletionResponse, InMemorySessionStore,
-    LocalExecutor, Provider, ReadFileTool, SingleAgent, ToolContext, ToolRegistry, WriteFileTool,
+    AgentConfig, AgentFactory, AgentLoop, BashTool, CompletionRequest, CompletionResponse,
+    InMemorySessionStore, LocalExecutor, Provider, ReadFileTool, SingleAgent, ToolContext,
+    ToolRegistry, WriteFileTool,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -67,6 +68,52 @@ impl Provider for Scripted {
     }
 }
 
+/// Hands out ready-made agents by provider name, the first being the default.
+struct Fixed(Vec<(&'static str, Arc<dyn AgentLoop>)>);
+
+impl Fixed {
+    fn one(agent: Arc<dyn AgentLoop>) -> Arc<Self> {
+        Arc::new(Self(vec![("scripted", agent)]))
+    }
+}
+
+impl AgentFactory for Fixed {
+    fn providers(&self) -> Vec<String> {
+        self.0.iter().map(|(n, _)| n.to_string()).collect()
+    }
+    fn build(&self, provider: &str) -> anyhow::Result<Arc<dyn AgentLoop>> {
+        self.0
+            .iter()
+            .find(|(n, _)| *n == provider)
+            .map(|(_, a)| a.clone())
+            .ok_or_else(|| anyhow::anyhow!("no {provider}"))
+    }
+}
+
+fn scripted(name: &'static str, replies: Vec<CompletionResponse>) -> Arc<dyn AgentLoop> {
+    struct Named(&'static str, Scripted);
+    #[async_trait]
+    impl Provider for Named {
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                name: self.0.into(),
+                model: Some(format!("{}-model", self.0)),
+            }
+        }
+        async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+            self.1.complete(req).await
+        }
+    }
+    Arc::new(SingleAgent {
+        config: AgentConfig::default(),
+        provider: Arc::new(Named(name, Scripted(Mutex::new(replies.into())))),
+        tools: ToolRegistry::new(),
+        tool_ctx: ToolContext {
+            executor: Arc::new(LocalExecutor),
+        },
+    })
+}
+
 /// What the fake client was asked to do, in order.
 #[derive(Default)]
 struct Log {
@@ -100,7 +147,7 @@ async fn run(
             executor: Arc::new(LocalExecutor),
         },
     });
-    let client_end = alx_acp::native(agent, Arc::new(InMemorySessionStore::default()));
+    let client_end = alx_acp::native(Fixed::one(agent), Arc::new(InMemorySessionStore::default()));
 
     let log = Arc::new(Mutex::new(Log::default()));
     let (l1, l2, l3, l4, l5, l6, l7, l8) = (
@@ -453,7 +500,7 @@ async fn sessions_are_listed_and_resumed_without_replay() {
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(
-            alx_acp::native(agent, store),
+            alx_acp::native(Fixed::one(agent), store),
             async move |cx: ConnectionTo<Agent>| {
                 let init = cx
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -528,6 +575,106 @@ async fn sessions_are_listed_and_resumed_without_replay() {
                     .await
                     .unwrap_err();
                 assert_eq!(missing.code, ErrorCode::InvalidParams);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sessions_pick_and_switch_providers() {
+    use agent_client_protocol::schema::v1::{
+        ErrorCode, ResumeSessionRequest, SessionConfigKind, SessionConfigOption,
+        SetSessionConfigOptionRequest,
+    };
+    let factory = Arc::new(Fixed(vec![
+        ("one", scripted("one", vec![reply(vec![text("from one")])])),
+        ("two", scripted("two", vec![reply(vec![text("from two")])])),
+    ]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let seen = updates.clone();
+    let prompt =
+        |id, t: &str| PromptRequest::new(id, vec![ContentBlock::Text(TextContent::new(t))]);
+    let current = |options: &[SessionConfigOption]| match &options[0].kind {
+        SessionConfigKind::Select(s) => s.current_value.0.to_string(),
+        _ => panic!("not a select"),
+    };
+    let said = move || {
+        seen.lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|u| match u {
+                SessionUpdate::AgentMessageChunk(c) => match c.content {
+                    ContentBlock::Text(t) => Some(t.text),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    Client
+        .builder()
+        .on_receive_notification(
+            async move |n: SessionNotification, _cx| {
+                updates.lock().unwrap().push(n.update);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(
+            alx_acp::native(factory, store),
+            async move |cx: ConnectionTo<Agent>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let new = cx
+                    .send_request(NewSessionRequest::new("/p"))
+                    .block_task()
+                    .await?;
+                let options = new.config_options.unwrap();
+                assert_eq!(options[0].id.0.as_ref(), alx_acp::PROVIDER_OPTION);
+                assert_eq!(current(&options), "one");
+                assert_eq!(new.meta.unwrap()[alx_acp::MODEL_META], "one-model");
+                let id = new.session_id;
+                cx.send_request(prompt(id.clone(), "hi"))
+                    .block_task()
+                    .await?;
+                assert_eq!(said(), "from one");
+
+                let switched = cx
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        id.clone(),
+                        alx_acp::PROVIDER_OPTION,
+                        "two",
+                    ))
+                    .block_task()
+                    .await?;
+                assert_eq!(current(&switched.config_options), "two");
+                assert_eq!(switched.meta.unwrap()[alx_acp::MODEL_META], "two-model");
+                cx.send_request(prompt(id.clone(), "hi"))
+                    .block_task()
+                    .await?;
+                assert_eq!(said(), "from two");
+
+                let unknown = cx
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        id.clone(),
+                        alx_acp::PROVIDER_OPTION,
+                        "three",
+                    ))
+                    .block_task()
+                    .await
+                    .unwrap_err();
+                assert_eq!(unknown.code, ErrorCode::InvalidParams);
+
+                // The choice is stored with the session.
+                let resumed = cx
+                    .send_request(ResumeSessionRequest::new(id, "/p"))
+                    .block_task()
+                    .await?;
+                assert_eq!(current(&resumed.config_options.unwrap()), "two");
                 Ok(())
             },
         )

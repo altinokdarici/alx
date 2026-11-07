@@ -72,16 +72,25 @@ history if you need it as a reference.
   session: a header line, then one message per line) in `session_dir`
   (default `~/.local/share/alx/sessions`). `alx --continue` resumes the latest
   session started in the current directory, `--resume <id>` a specific one,
-  `--list-sessions` lists them. Copilot keeps provider-side state that is not
+  `--list-sessions` lists them. The header records the session's provider, so it
+  resumes on the same one. Copilot keeps provider-side state that is not
   restored on resume; only the message history is.
-- ACP (Agent Client Protocol): `alx-acp` serves any `AgentLoop` + `SessionStore`
-  over ACP (`alx_acp::serve(agent, store, transport)`), using the
+- ACP (Agent Client Protocol): `alx-acp` serves an `AgentFactory` + `SessionStore`
+  over ACP (`alx_acp::serve(agents, store, transport)`), using the
   `agent-client-protocol` SDK. It calls the core directly (function calls);
   ACP is only its outside. `alx_acp::transport` has the ready-made transports:
-  `native(agent, store)` (in-process channel, returns the client end; used by
+  `native(agents, store)` (in-process channel, returns the client end; used by
   the CLI and `crates/alx-acp/tests/in_process.rs`) and `serve_stdio` for
   `alx --acp` (editors). HTTP/WebSocket are still to come; any SDK `ConnectTo`
   works with `serve`. The prompt reply names the model in `_meta.model`.
+  One server is not tied to a provider: every ACP session gets its own agent from
+  the `AgentFactory` (`SettingsAgentFactory` builds them from `Settings`; the
+  default is `settings.provider`, and `settings.model` applies to it only). The
+  session's provider is a `provider` select config option (in the new / load /
+  resume replies, model in `_meta.model`); `session/set_config_option` switches it
+  between turns and the choice is saved with the session. The CLI's
+  `/provider [name]` shows or switches it, and `--provider` with `--continue` /
+  `--resume` switches the resumed session.
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history;
   `session/list` (paged, optional `cwd` filter; message count in
@@ -103,7 +112,7 @@ history if you need it as a reference.
 - `crates/alx-protocol`: wire types shared by core and clients (messages, tool specs, events)
 - `crates/alx-acp`: ACP server over `alx-core` (see above)
 - `crates/alx-core`: agent loop, traits, built-in implementations, and
-  `agent_from_env` / `load_dotenv`, the default wiring for binaries
+  `agent_from_settings` / `SettingsAgentFactory` / `load_dotenv`, the default wiring for binaries
 - `crates/alx-cli`: the `alx` binary, an interactive REPL with line editing and history (`rustyline`: arrows, Home/End, Up/Down);
   `markdown.rs` renders assistant text (Markdown via `pulldown-cmark`) as ANSI-styled terminal text, word-wrapped to the terminal width (tables shrink and wrap cells), plain when color is off;
   `render.rs` formats events compactly (one line per tool call, full output with `--verbose`; ANSI color on a TTY, off with `NO_COLOR`)
@@ -136,6 +145,7 @@ history if you need it as a reference.
   - Env: `ALX_PROVIDER`, `ALX_MODEL`, `ALX_SESSION_DIR`, `ALX_ANTHROPIC_BASE_URL`, `COPILOT_CLI_PATH`,
     `COPILOT_HOME`. Flags: `--provider`, `--model`, `--config`, `--session-dir`.
   - `CLAUDE_API_KEY` (env or `.env`) is the only way to give the Anthropic key;
-    it is rejected in files.
+    it is rejected in files. It is checked on the first request, not at startup,
+    so listing sessions or using Copilot needs no key.
   - A new setting means: a field in `Settings`, its `merge` line, its env var in
     `from_env_with`, and a flag if it is worth one.

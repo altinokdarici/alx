@@ -1,7 +1,7 @@
 //! alx dev CLI: a line-based REPL.
 //!
-//! This is just one client of the core. The agent itself is wired up in
-//! `alx_core::agent_from_settings` and served over ACP by `alx-acp` on its
+//! This is just one client of the core. Agents are wired up by
+//! `alx_core::SettingsAgentFactory` and served over ACP by `alx-acp` on its
 //! in-process (native) transport; this crate is an ACP client that reads
 //! input and renders the updates in `CliRenderer`.
 
@@ -11,14 +11,18 @@ mod render;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, ErrorCode, InitializeRequest, ListSessionsRequest,
+    CancelNotification, ContentBlock, ErrorCode, InitializeRequest, ListSessionsRequest, Meta,
     NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionId,
-    SessionInfo, SessionNotification, TextContent,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
+    SessionConfigOption, SessionConfigSelectOptions, SessionId, SessionInfo, SessionNotification,
+    SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo};
 use alx_core::protocol::{Event, StopReason};
-use alx_core::{EventSink, FileSessionStore, ProviderKind, SessionStore, Settings};
+use alx_core::{
+    AgentFactory, EventSink, FileSessionStore, ProviderKind, SessionStore, Settings,
+    SettingsAgentFactory,
+};
 use clap::Parser;
 use client::{CompactOutcome, Translator};
 use render::{CliRenderer, Style};
@@ -32,10 +36,11 @@ use std::sync::{Arc, Mutex};
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// LLM backend: `anthropic` or `copilot`.
+    /// LLM backend for new sessions (`anthropic` or `copilot`). With
+    /// --continue or --resume, switches the resumed session to it.
     #[arg(long)]
     provider: Option<ProviderKind>,
-    /// Model id for the selected provider.
+    /// Model id for the default provider (see --provider).
     #[arg(long)]
     model: Option<String>,
     /// Use this config file instead of `./alx.toml`.
@@ -84,12 +89,59 @@ fn session_line(s: &SessionInfo) -> String {
     )
 }
 
-/// Which session the REPL works in, or `List` to only list them.
+/// Which session the REPL works in, or `List` to only list them. A resumed
+/// session can be switched to another provider.
 enum Start {
     New,
-    Continue,
-    Resume(String),
+    Continue(Option<ProviderKind>),
+    Resume(String, Option<ProviderKind>),
     List,
+}
+
+/// The session's provider setting: its current value and the choices.
+fn provider_option(options: &[SessionConfigOption]) -> Option<(String, Vec<String>)> {
+    let option = options
+        .iter()
+        .find(|o| &*o.id.0 == alx_acp::PROVIDER_OPTION)?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let choices = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(o) => {
+            o.iter().map(|o| o.value.0.to_string()).collect()
+        }
+        SessionConfigSelectOptions::Grouped(g) => g
+            .iter()
+            .flat_map(|g| &g.options)
+            .map(|o| o.value.0.to_string())
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some((select.current_value.0.to_string(), choices))
+}
+
+fn model_of(meta: Option<&Meta>) -> Option<String> {
+    meta?.get(alx_acp::MODEL_META)?.as_str().map(str::to_owned)
+}
+
+/// What the REPL shows about the session's provider.
+struct OnProvider {
+    current: String,
+    choices: Vec<String>,
+    model: Option<String>,
+}
+
+impl OnProvider {
+    fn new(options: Option<&[SessionConfigOption]>, meta: Option<&Meta>) -> Self {
+        let (current, choices) = options
+            .and_then(provider_option)
+            .unwrap_or_else(|| ("?".into(), Vec::new()));
+        Self {
+            current,
+            choices,
+            model: model_of(meta),
+        }
+    }
 }
 
 /// Process exit codes. `end_turn` is the only "successful" way for a turn to finish.
@@ -119,6 +171,7 @@ fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<u8> {
     let cli = Cli::parse();
+    let switch_to = cli.provider;
     let settings = Settings::load(cli.config.as_deref())?.merge(Settings {
         provider: cli.provider,
         model: cli.model,
@@ -126,10 +179,10 @@ async fn run() -> anyhow::Result<u8> {
         ..Default::default()
     });
     let store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::new(settings.session_dir()?));
-    let agent = alx_core::agent_from_settings(&settings)?;
+    let agents: Arc<dyn AgentFactory> = Arc::new(SettingsAgentFactory(settings));
     if cli.acp {
         // stdout carries the protocol, so nothing else may print to it.
-        alx_acp::serve_stdio(Arc::new(agent), store)
+        alx_acp::serve_stdio(agents, store)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         return Ok(0);
@@ -137,20 +190,17 @@ async fn run() -> anyhow::Result<u8> {
     let start = if cli.list_sessions {
         Start::List
     } else if let Some(id) = cli.resume {
-        Start::Resume(id)
+        Start::Resume(id, switch_to)
     } else if cli.continue_last {
-        Start::Continue
+        Start::Continue(switch_to)
     } else {
         Start::New
     };
     let style = Style::detect();
-    let info = agent.provider.info();
-    let banner = render::banner(&style, &info.name, info.model.as_deref());
     // The REPL is an ACP client like any editor; this is only the transport.
-    let transport = alx_acp::native(Arc::new(agent), store);
+    let transport = alx_acp::native(agents, store);
     let repl = Repl {
         style,
-        banner,
         renderer: Arc::new(CliRenderer::new(style, cli.verbose)),
         translator: Arc::default(),
         compacted: Arc::default(),
@@ -161,8 +211,6 @@ async fn run() -> anyhow::Result<u8> {
 /// The REPL, an ACP client of the agent.
 struct Repl {
     style: Style,
-    /// Shown once the session is open.
-    banner: String,
     renderer: Arc<CliRenderer>,
     translator: Arc<Translator>,
     /// The final word on the running `/compact`.
@@ -219,7 +267,7 @@ impl Repl {
             .await
             .map_err(acp)?;
         let dir = std::env::current_dir()?;
-        let (session, resumed) = match start {
+        let opened = match start {
             Start::List => {
                 for s in list_sessions(&cx, None).await? {
                     println!("{}", session_line(&s));
@@ -227,15 +275,15 @@ impl Repl {
                 return Ok(0);
             }
             Start::New => {
-                let id = cx
+                let new = cx
                     .send_request(NewSessionRequest::new(dir))
                     .block_task()
                     .await
-                    .map_err(acp)?
-                    .session_id;
-                (id, None)
+                    .map_err(acp)?;
+                let on = OnProvider::new(new.config_options.as_deref(), new.meta.as_ref());
+                (new.session_id, None, on, None)
             }
-            Start::Continue => {
+            Start::Continue(switch_to) => {
                 let latest = list_sessions(&cx, Some(dir.clone()))
                     .await?
                     .into_iter()
@@ -243,15 +291,24 @@ impl Repl {
                 let Some(latest) = latest else {
                     anyhow::bail!("no previous session for this directory");
                 };
-                let (id, count) = resume(&cx, latest.session_id, dir).await?;
-                (id, Some(count))
+                let (id, count, on) = resume(&cx, latest.session_id, dir).await?;
+                (id, Some(count), on, switch_to)
             }
-            Start::Resume(id) => {
-                let (id, count) = resume(&cx, SessionId::new(id), dir).await?;
-                (id, Some(count))
+            Start::Resume(id, switch_to) => {
+                let (id, count, on) = resume(&cx, SessionId::new(id), dir).await?;
+                (id, Some(count), on, switch_to)
             }
         };
-        println!("{}", self.banner);
+        let (session, resumed, mut on, switch_to) = opened;
+        if let Some(to) = switch_to.map(|k| k.to_string())
+            && to != on.current
+        {
+            on = set_provider(&cx, &session, &to).await?;
+        }
+        println!(
+            "{}",
+            render::banner(style, &on.current, on.model.as_deref())
+        );
         if let Some(count) = resumed {
             println!("Resumed session {} ({count} messages)", session.0);
         }
@@ -293,6 +350,33 @@ impl Repl {
                 break;
             }
             if input.is_empty() {
+                continue;
+            }
+            if input == "/provider" || input.starts_with("/provider ") {
+                match input["/provider".len()..].trim() {
+                    "" => println!(
+                        "{}",
+                        style.dim(&format!(
+                            "provider: {} (available: {}). Switch with /provider <name>.",
+                            on.current,
+                            on.choices.join(", ")
+                        ))
+                    ),
+                    to => match set_provider(&cx, &session, to).await {
+                        Ok(now) => {
+                            on = now;
+                            println!(
+                                "{}",
+                                style.dim(&format!(
+                                    "Switched to {} · model: {}",
+                                    on.current,
+                                    on.model.as_deref().unwrap_or("provider default")
+                                ))
+                            );
+                        }
+                        Err(e) => eprintln!("{}", render::error_line(style, &format!("{e:#}"))),
+                    },
+                }
                 continue;
             }
             if input == "/compact" {
@@ -387,13 +471,34 @@ async fn list_sessions(
     }
 }
 
+/// Switches the session to `provider` with `session/set_config_option`.
+async fn set_provider(
+    cx: &ConnectionTo<Agent>,
+    session: &SessionId,
+    provider: &str,
+) -> anyhow::Result<OnProvider> {
+    let reply = cx
+        .send_request(SetSessionConfigOptionRequest::new(
+            session.clone(),
+            alx_acp::PROVIDER_OPTION,
+            provider,
+        ))
+        .block_task()
+        .await
+        .map_err(acp)?;
+    Ok(OnProvider::new(
+        Some(&reply.config_options),
+        reply.meta.as_ref(),
+    ))
+}
+
 /// Reopens a stored session with `session/resume`, which does not replay
-/// its history. Also returns its message count.
+/// its history. Also returns its message count and provider.
 async fn resume(
     cx: &ConnectionTo<Agent>,
     id: SessionId,
     cwd: PathBuf,
-) -> anyhow::Result<(SessionId, u64)> {
+) -> anyhow::Result<(SessionId, u64, OnProvider)> {
     let reply = cx
         .send_request(ResumeSessionRequest::new(id.clone(), cwd))
         .block_task()
@@ -410,5 +515,6 @@ async fn resume(
         .and_then(|m| m.get(alx_acp::MESSAGE_COUNT_META))
         .and_then(|c| c.as_u64())
         .unwrap_or(0);
-    Ok((id, count))
+    let on = OnProvider::new(reply.config_options.as_deref(), reply.meta.as_ref());
+    Ok((id, count, on))
 }

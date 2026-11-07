@@ -27,6 +27,9 @@ pub struct Session {
     /// Working directory the session was started in, so clients can offer
     /// "continue the last session in this project".
     pub cwd: Option<String>,
+    /// The provider the session last ran on (e.g. `anthropic`), so it
+    /// resumes on the same one. `None` means the default.
+    pub provider: Option<String>,
 }
 
 impl Session {
@@ -38,6 +41,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             cwd: None,
+            provider: None,
         }
     }
 
@@ -144,6 +148,8 @@ struct Header {
     updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
 }
 
 /// One JSONL file per session in a directory: a header line, then one
@@ -185,6 +191,7 @@ fn parse(text: &str) -> anyhow::Result<Session> {
         created_at: header.created_at,
         updated_at: header.updated_at,
         cwd: header.cwd,
+        provider: header.provider,
     })
 }
 
@@ -194,6 +201,7 @@ fn render(session: &Session, updated_at: u64) -> anyhow::Result<String> {
         created_at: session.created_at,
         updated_at,
         cwd: session.cwd.clone(),
+        provider: session.provider.clone(),
     })?;
     out.push('\n');
     for m in &session.messages {
@@ -284,6 +292,7 @@ mod tests {
     fn session(id: &str, text: &str) -> Session {
         let mut s = Session::new(id);
         s.cwd = Some("/proj".into());
+        s.provider = Some("copilot".into());
         s.messages.push(Message::user_text(text));
         s.messages.push(Message {
             role: Role::Assistant,
@@ -308,6 +317,7 @@ mod tests {
         let loaded = store.load("a").await.unwrap().unwrap();
         assert_eq!(loaded.messages, s.messages);
         assert_eq!(loaded.cwd, s.cwd);
+        assert_eq!(loaded.provider, s.provider);
         assert_eq!(loaded.created_at, s.created_at);
         assert!(store.load("missing").await.unwrap().is_none());
         // Saving again overwrites rather than duplicating.

@@ -2,10 +2,10 @@
 //! than in a binary so every client is wired the same way.
 
 use crate::{
-    AgentConfig, AnthropicConfig, AnthropicProvider, BashTool, LocalExecutor, Provider,
-    ProviderKind, ReadFileTool, Settings, SingleAgent, ToolContext, ToolRegistry, WriteFileTool,
+    AgentConfig, AgentFactory, AgentLoop, AnthropicConfig, AnthropicProvider, BashTool,
+    LocalExecutor, Provider, ProviderKind, ReadFileTool, Settings, SingleAgent, ToolContext,
+    ToolRegistry, WriteFileTool,
 };
-use anyhow::Context;
 use std::sync::Arc;
 
 /// Default agent: the provider from [`provider_from_settings`], the bash,
@@ -31,6 +31,35 @@ pub fn agent_from_settings(settings: &Settings) -> anyhow::Result<SingleAgent> {
     })
 }
 
+/// Builds [`agent_from_settings`] agents for any provider alx was built
+/// with. `settings.provider` is the default; `settings.model` applies to it
+/// only, since a model id rarely means anything to another provider.
+pub struct SettingsAgentFactory(pub Settings);
+
+impl AgentFactory for SettingsAgentFactory {
+    fn providers(&self) -> Vec<String> {
+        let default = self.0.provider_kind();
+        let mut all = vec![default.to_string()];
+        all.extend(
+            ProviderKind::ALL
+                .iter()
+                .filter(|&&k| k != default)
+                .map(ToString::to_string),
+        );
+        all
+    }
+
+    fn build(&self, provider: &str) -> anyhow::Result<Arc<dyn AgentLoop>> {
+        let kind: ProviderKind = provider.parse()?;
+        let mut settings = self.0.clone();
+        if kind != settings.provider_kind() {
+            settings.model = None;
+        }
+        settings.provider = Some(kind);
+        Ok(Arc::new(agent_from_settings(&settings)?))
+    }
+}
+
 /// Appends project instructions (the contents of `./AGENTS.md`) to the system
 /// prompt, fenced so the model can tell them from alx's own prompt.
 fn with_instructions(system_prompt: &str, instructions: &str) -> String {
@@ -44,11 +73,8 @@ fn with_instructions(system_prompt: &str, instructions: &str) -> String {
 pub fn provider_from_settings(settings: &Settings) -> anyhow::Result<Arc<dyn Provider>> {
     match settings.provider_kind() {
         ProviderKind::Anthropic => {
-            let api_key = settings
-                .anthropic
-                .api_key
-                .clone()
-                .context("CLAUDE_API_KEY environment variable is not set")?;
+            // A missing key fails the first request, not construction.
+            let api_key = settings.anthropic.api_key.clone().unwrap_or_default();
             let mut config = AnthropicConfig::new(api_key);
             if let Some(model) = &settings.model {
                 config.model = model.clone();
@@ -112,6 +138,25 @@ mod tests {
         let prompt = with_instructions("base", "\nbe terse\n");
         assert!(prompt.starts_with("base\n\n<project_instructions"));
         assert!(prompt.contains("\nbe terse\n</project_instructions>"));
+    }
+
+    #[test]
+    fn factory_puts_the_default_provider_first_and_keeps_its_model() {
+        let factory = SettingsAgentFactory(Settings {
+            provider: Some(ProviderKind::Copilot),
+            model: Some("m".into()),
+            ..Default::default()
+        });
+        assert_eq!(factory.providers()[0], "copilot");
+        assert!(factory.providers().contains(&"anthropic".to_owned()));
+        let info = |p| factory.build(p).unwrap().provider_info().unwrap();
+        assert_eq!(info("copilot").model.as_deref(), Some("m"));
+        // No key needed to build it; the model is the provider's own default.
+        assert_eq!(
+            info("anthropic").model.as_deref(),
+            Some(AnthropicConfig::DEFAULT_MODEL)
+        );
+        assert!(factory.build("nope").is_err());
     }
 
     #[test]

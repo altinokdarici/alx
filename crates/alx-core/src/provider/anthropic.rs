@@ -297,6 +297,11 @@ impl Provider for AnthropicProvider {
         req: CompletionRequest,
         on_text: &(dyn for<'a> Fn(&'a str) + Send + Sync),
     ) -> anyhow::Result<CompletionResponse> {
+        // Checked here rather than at construction, so an agent can be built
+        // (e.g. to list sessions) without a key.
+        if self.config.api_key.is_empty() {
+            bail!("CLAUDE_API_KEY environment variable is not set");
+        }
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let resp = self
             .http

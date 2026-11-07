@@ -5,7 +5,7 @@ use crate::executor::Executor;
 use crate::provider::{CompletionRequest, Provider};
 use crate::session::Session;
 use crate::tool::{Approval, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
-use alx_protocol::{ContentBlock, Event, Message, Role, StopReason, Usage};
+use alx_protocol::{ContentBlock, Event, Message, ProviderInfo, Role, StopReason, Usage};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +48,21 @@ pub trait AgentLoop: Send + Sync {
     /// [`Event::Compacted`] when something was compacted and returns whether
     /// it was. Errors if the provider can't compact.
     async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool>;
+
+    /// The provider (and model) this agent talks to, for display.
+    fn provider_info(&self) -> Option<ProviderInfo> {
+        None
+    }
+}
+
+/// Builds agents on demand, one per provider name, so a server can give
+/// every session its own agent on the provider the session picked.
+pub trait AgentFactory: Send + Sync {
+    /// The provider names [`build`](Self::build) accepts, the default first.
+    fn providers(&self) -> Vec<String>;
+
+    /// A fresh agent on `provider`. Cheap: providers connect lazily.
+    fn build(&self, provider: &str) -> anyhow::Result<Arc<dyn AgentLoop>>;
 }
 
 /// Per-turn overrides for [`AgentLoop::run_turn_with`].
@@ -224,6 +239,10 @@ fn mark_cancelled(session: &mut Session) -> StopReason {
 
 #[async_trait]
 impl AgentLoop for SingleAgent {
+    fn provider_info(&self) -> Option<ProviderInfo> {
+        Some(self.provider.info())
+    }
+
     async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool> {
         let compaction = self.provider.compact().await?;
         if let Some(c) = compaction {

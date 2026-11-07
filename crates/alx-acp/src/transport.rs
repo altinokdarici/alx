@@ -10,23 +10,23 @@
 //! Remote transports (HTTP, WebSocket) are still to come.
 
 use agent_client_protocol::{Channel, Error, Stdio};
-use alx_core::{AgentLoop, SessionStore};
+use alx_core::{AgentFactory, SessionStore};
 use std::sync::Arc;
 
 /// Starts the server in this process and returns the client's end of the
 /// connection, for `Client.builder().connect_with(..)`. The server stops when
 /// the client end is dropped.
-pub fn native(agent: Arc<dyn AgentLoop>, store: Arc<dyn SessionStore>) -> Channel {
+pub fn native(agents: Arc<dyn AgentFactory>, store: Arc<dyn SessionStore>) -> Channel {
     let (client_end, agent_end) = Channel::duplex();
-    tokio::spawn(crate::serve(agent, store, agent_end));
+    tokio::spawn(crate::serve(agents, store, agent_end));
     client_end
 }
 
 /// Serves on stdin/stdout until the client disconnects. Nothing else may
 /// write to stdout meanwhile.
 pub async fn serve_stdio(
-    agent: Arc<dyn AgentLoop>,
+    agents: Arc<dyn AgentFactory>,
     store: Arc<dyn SessionStore>,
 ) -> Result<(), Error> {
-    crate::serve(agent, store, Stdio::new()).await
+    crate::serve(agents, store, Stdio::new()).await
 }

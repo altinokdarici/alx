@@ -25,6 +25,15 @@ pub enum ProviderKind {
     Copilot,
 }
 
+impl ProviderKind {
+    /// Every provider alx was built with.
+    pub const ALL: &[Self] = &[
+        Self::Anthropic,
+        #[cfg(feature = "copilot")]
+        Self::Copilot,
+    ];
+}
+
 impl FromStr for ProviderKind {
     type Err = anyhow::Error;
 
