@@ -13,8 +13,10 @@
 
 mod client_env;
 mod events;
+mod sessions;
 pub mod transport;
 
+pub use sessions::MESSAGE_COUNT_META;
 pub use transport::{native, serve_stdio};
 
 /// `_meta` key of a `session/prompt` reply that names the model that answered.
@@ -23,9 +25,11 @@ pub const MODEL_META: &str = "model";
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
     ClientCapabilities, CompactionStatus, CompactionUpdate, ContentBlock, Implementation,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-    SessionNotification, SessionUpdate, StopReason, Usage as AcpUsage,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
+    LoadSessionResponse, Meta, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionId,
+    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    StopReason, Usage as AcpUsage,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use alx_core::protocol::{Compaction, Event, Message, Usage};
@@ -167,7 +171,15 @@ pub async fn serve(
                     *server.client_caps.lock().unwrap() = init.client_capabilities;
                     responder.respond(
                         InitializeResponse::new(init.protocol_version)
-                            .agent_capabilities(AgentCapabilities::new().load_session(true))
+                            .agent_capabilities(
+                                AgentCapabilities::new()
+                                    .load_session(true)
+                                    .session_capabilities(
+                                        SessionCapabilities::new()
+                                            .list(SessionListCapabilities::new())
+                                            .resume(SessionResumeCapabilities::new()),
+                                    ),
+                            )
                             .agent_info(Implementation::new("alx", env!("CARGO_PKG_VERSION"))),
                     )
                 }
@@ -208,6 +220,58 @@ pub async fn serve(
                         events::replay(&cx, &req.session_id, &session.messages)?;
                         server.open(session);
                         responder.respond(LoadSessionResponse::new())?;
+                        cx.send_notification(SessionNotification::new(
+                            req.session_id,
+                            commands_update(),
+                        ))
+                    })
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let server = server.clone();
+                async move |req: ListSessionsRequest, responder, cx: ConnectionTo<Client>| {
+                    let server = server.clone();
+                    cx.spawn(async move {
+                        let all = server
+                            .store
+                            .list()
+                            .await
+                            .map_err(|e| Error::internal_error().data(format!("{e:#}")));
+                        match all.and_then(|all| sessions::page(all, &req)) {
+                            Ok(page) => responder.respond(page),
+                            Err(e) => responder.respond_with_error(e),
+                        }
+                    })
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let server = server.clone();
+                async move |req: ResumeSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let server = server.clone();
+                    cx.clone().spawn(async move {
+                        let loaded = server
+                            .store
+                            .load(&req.session_id.0)
+                            .await
+                            .map_err(|e| Error::internal_error().data(format!("{e:#}")))?;
+                        let Some(session) = loaded else {
+                            return responder.respond_with_error(
+                                Error::invalid_params()
+                                    .data(format!("unknown session `{}`", req.session_id.0)),
+                            );
+                        };
+                        // Unlike `session/load`, the client already has the history.
+                        let count = session.messages.len();
+                        server.open(session);
+                        responder.respond(
+                            ResumeSessionResponse::new().meta(sessions::message_count_meta(count)),
+                        )?;
                         cx.send_notification(SessionNotification::new(
                             req.session_id,
                             commands_update(),

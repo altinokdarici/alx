@@ -83,7 +83,10 @@ history if you need it as a reference.
   `alx --acp` (editors). HTTP/WebSocket are still to come; any SDK `ConnectTo`
   works with `serve`. The prompt reply names the model in `_meta.model`.
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
-  `session/cancel` cancels the turn's token; `session/load` replays history.
+  `session/cancel` cancels the turn's token; `session/load` replays history;
+  `session/list` (paged, optional `cwd` filter; message count in
+  `_meta.messageCount`) and `session/resume` (no replay) are served from the
+  `SessionStore`.
   `Compacted` becomes a `compaction_update`; turn `Usage` goes in
   `PromptResponse.usage` (unstable SDK feature). A `/compact` prompt (advertised
   via `available_commands_update`) runs `AgentLoop::compact`. Each turn runs
@@ -106,8 +109,10 @@ history if you need it as a reference.
   `render.rs` formats events compactly (one line per tool call, full output with `--verbose`; ANSI color on a TTY, off with `NO_COLOR`)
 - `alx-cli` is an ACP client: it reaches the agent through `alx-acp`'s native
   transport, and `client.rs` turns `session/update`s back into `Event`s for the
-  renderer. It still builds the agent (`agent_from_settings`) and reads the
-  session store directly for `--list-sessions` / `--continue`.
+  renderer. `--list-sessions`, `--continue` (newest `session/list` entry for
+  the cwd) and `--resume` (`session/resume`) all go over ACP; the CLI only
+  builds the agent and store to hand to the transport, so listing needs a
+  working provider config.
 
 ## Working on it
 

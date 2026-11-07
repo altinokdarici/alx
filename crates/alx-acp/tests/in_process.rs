@@ -419,3 +419,118 @@ async fn compactions_become_compaction_updates() {
     assert_eq!(compactions[2].status, CompactionStatus::Failed);
     assert_eq!(compactions[1].compaction_id, compactions[2].compaction_id);
 }
+
+#[tokio::test]
+async fn sessions_are_listed_and_resumed_without_replay() {
+    use agent_client_protocol::schema::v1::{ErrorCode, ListSessionsRequest, ResumeSessionRequest};
+    let agent = Arc::new(SingleAgent {
+        config: AgentConfig::default(),
+        provider: Arc::new(Scripted(Mutex::new(
+            vec![
+                reply(vec![text("one")]),
+                reply(vec![text("two")]),
+                reply(vec![text("three")]),
+            ]
+            .into(),
+        ))),
+        tools: ToolRegistry::new(),
+        tool_ctx: ToolContext {
+            executor: Arc::new(LocalExecutor),
+        },
+    });
+    let store = Arc::new(InMemorySessionStore::default());
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let seen = updates.clone();
+    let prompt =
+        |id, t: &str| PromptRequest::new(id, vec![ContentBlock::Text(TextContent::new(t))]);
+    Client
+        .builder()
+        .on_receive_notification(
+            async move |n: SessionNotification, _cx| {
+                seen.lock().unwrap().push(n.update);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(
+            alx_acp::native(agent, store),
+            async move |cx: ConnectionTo<Agent>| {
+                let init = cx
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let caps = init.agent_capabilities.session_capabilities;
+                assert!(caps.list.is_some() && caps.resume.is_some());
+
+                let a = cx
+                    .send_request(NewSessionRequest::new("/a"))
+                    .block_task()
+                    .await?
+                    .session_id;
+                cx.send_request(prompt(a.clone(), "first"))
+                    .block_task()
+                    .await?;
+                let b = cx
+                    .send_request(NewSessionRequest::new("/b"))
+                    .block_task()
+                    .await?
+                    .session_id;
+                cx.send_request(prompt(b.clone(), "other"))
+                    .block_task()
+                    .await?;
+
+                let all = cx
+                    .send_request(ListSessionsRequest::new())
+                    .block_task()
+                    .await?;
+                assert_eq!(all.sessions.len(), 2);
+                assert_eq!(all.next_cursor, None);
+                let in_a = cx
+                    .send_request(ListSessionsRequest::new().cwd(std::path::PathBuf::from("/a")))
+                    .block_task()
+                    .await?;
+                assert_eq!(in_a.sessions.len(), 1);
+                let info = &in_a.sessions[0];
+                assert_eq!(info.session_id, a);
+                assert_eq!(info.title.as_deref(), Some("first"));
+                assert!(info.updated_at.as_deref().unwrap().ends_with('Z'));
+                assert_eq!(info.meta.as_ref().unwrap()[alx_acp::MESSAGE_COUNT_META], 2);
+
+                updates.lock().unwrap().clear();
+                let resumed = cx
+                    .send_request(ResumeSessionRequest::new(a.clone(), "/a"))
+                    .block_task()
+                    .await?;
+                assert_eq!(resumed.meta.unwrap()[alx_acp::MESSAGE_COUNT_META], 2);
+                // No history replay, only the command list.
+                assert!(
+                    updates
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|u| matches!(u, SessionUpdate::AvailableCommandsUpdate(_)))
+                );
+                cx.send_request(prompt(a.clone(), "again"))
+                    .block_task()
+                    .await?;
+                let in_a = cx
+                    .send_request(ListSessionsRequest::new().cwd(std::path::PathBuf::from("/a")))
+                    .block_task()
+                    .await?;
+                assert_eq!(
+                    in_a.sessions[0].meta.as_ref().unwrap()[alx_acp::MESSAGE_COUNT_META],
+                    4
+                );
+
+                let missing = cx
+                    .send_request(ResumeSessionRequest::new("nope", "/a"))
+                    .block_task()
+                    .await
+                    .unwrap_err();
+                assert_eq!(missing.code, ErrorCode::InvalidParams);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+}
