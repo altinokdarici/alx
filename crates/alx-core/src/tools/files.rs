@@ -135,6 +135,8 @@ impl Tool for WriteFileTool {
         let Some(content) = input.get("content").and_then(Value::as_str) else {
             return ToolOutput::error("Invalid tool call: write_file requires a string `content`");
         };
+        let lock = super::file_lock(&path);
+        let _guard = lock.lock().await;
         match ctx.executor.write_file(Path::new(&path), content).await {
             Ok(()) => ToolOutput::ok(format!("Wrote {} bytes to {path}", content.len())),
             Err(e) => ToolOutput::error(format!("Could not write {path}: {e}")),

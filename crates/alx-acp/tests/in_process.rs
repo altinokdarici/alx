@@ -266,17 +266,25 @@ async fn run(
     Run { log, replies }
 }
 
+/// Tool results ordered by call id (calls run concurrently, so they can
+/// finish in any order).
 fn tool_results(updates: &[SessionUpdate]) -> Vec<(ToolCallStatus, String)> {
-    updates
+    let mut results: Vec<_> = updates
         .iter()
         .filter_map(|u| match u {
             SessionUpdate::ToolCallUpdate(u) => {
                 let out = serde_json::to_value(&u.fields.content).unwrap();
-                Some((u.fields.status.unwrap(), out.to_string()))
+                Some((
+                    u.tool_call_id.to_string(),
+                    u.fields.status.unwrap(),
+                    out.to_string(),
+                ))
             }
             _ => None,
         })
-        .collect()
+        .collect();
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results.into_iter().map(|(_, s, o)| (s, o)).collect()
 }
 
 #[tokio::test]
@@ -364,19 +372,22 @@ async fn tools_use_the_clients_terminal_and_files() {
     )
     .await;
 
+    // The calls run concurrently, so only the set of requests is fixed.
+    let mut requests = run.log.requests.clone();
+    requests.sort();
     assert_eq!(
-        run.log.requests,
+        requests,
         [
-            r#"create bash ["-c", "make"] /work"#,
-            "wait",
-            "output",
-            "release",
-            r#"write /work/a.txt "new""#,
-            "read /abs/b.txt",
             r#"create bash ["-c", "make again"] /work"#,
-            "wait",
+            r#"create bash ["-c", "make"] /work"#,
             "output",
+            "output",
+            "read /abs/b.txt",
             "release",
+            "release",
+            "wait",
+            "wait",
+            r#"write /work/a.txt "new""#,
         ]
     );
     // "Always" is remembered per tool; read_file never asks.

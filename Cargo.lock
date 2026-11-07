@@ -97,6 +97,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cargo-husky",
+ "futures",
  "github-copilot-sdk",
  "globset",
  "libc",

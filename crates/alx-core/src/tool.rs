@@ -46,6 +46,12 @@ pub trait Tool: Send + Sync {
     fn read_only(&self) -> bool {
         false
     }
+
+    /// Whether a batch of tool calls that includes this tool must run one
+    /// call at a time. By default, calls in a batch run concurrently.
+    fn sequential(&self) -> bool {
+        false
+    }
 }
 
 /// The answer to a request to run a tool call.
@@ -88,6 +94,10 @@ impl ToolRegistry {
     }
 
     /// Whether `name` is a known read-only tool.
+    pub fn is_sequential(&self, name: &str) -> bool {
+        self.tools.get(name).is_some_and(|t| t.sequential())
+    }
+
     pub fn is_read_only(&self, name: &str) -> bool {
         self.tools.get(name).is_some_and(|t| t.read_only())
     }

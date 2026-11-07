@@ -141,8 +141,12 @@ fn plural(n: usize) -> String {
 struct State {
     /// A transient "thinking" hint is on the current line.
     thinking: bool,
-    /// A tool call line was printed without its newline, awaiting the result.
-    open_call: bool,
+    /// The id of the tool call whose line was printed without its newline,
+    /// awaiting the result.
+    open_call: Option<String>,
+    /// Calls started but not finished: id -> (name, input). Calls can run
+    /// concurrently, so a result may arrive after another call's line.
+    running: std::collections::HashMap<String, (String, serde_json::Value)>,
     last_model: Option<String>,
     /// Streamed text waiting for its block to be complete.
     splitter: crate::markdown::BlockSplitter,
@@ -178,7 +182,9 @@ impl Renderer {
         // Whatever is half-printed on the current line has to be dealt with first.
         let before = if st.thinking {
             CLEAR_LINE
-        } else if st.open_call && !matches!(event, Event::ToolCallFinished { .. }) {
+        } else if st.open_call.is_some()
+            && !matches!(event, Event::ToolCallFinished { id, .. } if st.open_call.as_ref() == Some(id))
+        {
             "\n"
         } else {
             ""
@@ -221,19 +227,27 @@ impl Renderer {
                 let text = text.strip_prefix("  ").unwrap_or(&text);
                 Some(format!("\n{} {text}\n", style.cyan_bold("●")))
             }
-            Event::ToolCallStarted { name, input, .. } => {
-                st.open_call = true;
-                Some(format!(
-                    "{} {}",
-                    style.yellow(&format!("▸ {name}")),
-                    style.bold(&call_summary(name, input))
-                ))
+            Event::ToolCallStarted { id, name, input } => {
+                st.open_call = Some(id.clone());
+                st.running.insert(id.clone(), (name.clone(), input.clone()));
+                Some(self.call_line(name, input))
             }
             Event::ToolCallFinished {
-                output, is_error, ..
+                id,
+                output,
+                is_error,
+                ..
             } => {
-                st.open_call = false;
-                Some(self.finished(output, *is_error))
+                let call = st.running.remove(id);
+                let finished = self.finished(output, *is_error);
+                if st.open_call.take().as_ref() == Some(id) {
+                    Some(finished)
+                } else {
+                    // Its line is no longer the last one: name the call again.
+                    let line = call
+                        .map_or_else(String::new, |(name, input)| self.call_line(&name, &input));
+                    Some(format!("{line}{finished}"))
+                }
             }
             Event::ContextUsage(c) => {
                 st.context = Some(*c);
@@ -292,6 +306,14 @@ impl Renderer {
             }
         }
         out
+    }
+
+    fn call_line(&self, name: &str, input: &serde_json::Value) -> String {
+        format!(
+            "{} {}",
+            self.style.yellow(&format!("▸ {name}")),
+            self.style.bold(&call_summary(name, input))
+        )
     }
 
     fn finished(&self, output: &str, is_error: bool) -> String {
@@ -430,6 +452,36 @@ mod tests {
         let r = Renderer::new(PLAIN, false);
         let out = call(&r, "ls -la") + &finish(&r, "a\nb\nc\n", false);
         assert_eq!(out, "▸ bash ls -la  ✓ 3 lines\n");
+    }
+
+    #[test]
+    fn concurrent_calls_put_each_result_by_its_own_call() {
+        let r = Renderer::new(PLAIN, false);
+        let ev = |id: &str, done: bool| {
+            let name = "bash".to_owned();
+            if done {
+                Event::ToolCallFinished {
+                    id: id.into(),
+                    name,
+                    output: format!("{id}\n"),
+                    is_error: false,
+                }
+            } else {
+                Event::ToolCallStarted {
+                    id: id.into(),
+                    name,
+                    input: json!({"input": format!("run {id}")}),
+                }
+            }
+        };
+        let out: String = [ev("a", false), ev("b", false), ev("a", true), ev("b", true)]
+            .iter()
+            .filter_map(|e| r.handle(e))
+            .collect();
+        assert_eq!(
+            out,
+            "▸ bash run a\n▸ bash run b\n▸ bash run a  ✓ 1 line\n▸ bash run b  ✓ 1 line\n"
+        );
     }
 
     #[test]

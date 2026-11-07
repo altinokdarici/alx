@@ -172,17 +172,21 @@ impl SingleAgent {
                 return Ok(resp.stop_reason);
             }
 
-            // All tool results go in a single user message after the assistant turn.
-            let mut results = Vec::with_capacity(tool_calls.len());
+            // Approvals are asked in order, one at a time. The approved calls
+            // then run concurrently (or in order, if any tool asks for that),
+            // and the results keep the order of the calls.
             let mut cancelled = false;
+            let mut prepared = Vec::with_capacity(tool_calls.len());
             for (id, name, input) in tool_calls {
-                if cancelled {
+                if cancelled || cancel.is_cancelled() {
+                    cancelled = true;
                     // Every tool_use still needs a tool_result.
-                    results.push(ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: "Not executed: cancelled by user.".into(),
-                        is_error: true,
-                    });
+                    prepared.push((
+                        id,
+                        name,
+                        input,
+                        Some(ToolOutput::error("Not executed: cancelled by user.")),
+                    ));
                     continue;
                 }
                 events.emit(Event::ToolCallStarted {
@@ -194,34 +198,81 @@ impl SingleAgent {
                     .approver
                     .as_ref()
                     .filter(|_| !self.tools.is_read_only(&name));
-                let run = async {
-                    if let Some(approver) = approver
-                        && approver.approve(&id, &name, &input).await == Approval::Deny
-                    {
-                        return ToolOutput::error("The user denied permission to run this tool.");
-                    }
-                    self.tools.call(&name, input, &tool_ctx).await
+                let denied = match approver {
+                    None => None,
+                    Some(approver) => tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            cancelled = true;
+                            Some(ToolOutput::error("Cancelled by user."))
+                        }
+                        a = approver.approve(&id, &name, &input) => (a == Approval::Deny)
+                            .then(|| ToolOutput::error("The user denied permission to run this tool.")),
+                    },
                 };
-                let out = tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        cancelled = true;
-                        ToolOutput::error("Cancelled by user.")
+                if let Some(out) = &denied {
+                    events.emit(Event::ToolCallFinished {
+                        id: id.clone(),
+                        name: name.clone(),
+                        output: out.content.clone(),
+                        is_error: true,
+                    });
+                }
+                prepared.push((id, name, input, denied));
+            }
+
+            let sequential = prepared
+                .iter()
+                .any(|(_, name, _, done)| done.is_none() && self.tools.is_sequential(name));
+            let run_one =
+                |id: String, name: String, input: serde_json::Value, done: Option<ToolOutput>| {
+                    let tool_ctx = &tool_ctx;
+                    async move {
+                        let out = match done {
+                            Some(out) => return (id, out),
+                            None => tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => ToolOutput::error("Cancelled by user."),
+                                out = self.tools.call(&name, input, tool_ctx) => out,
+                            },
+                        };
+                        events.emit(Event::ToolCallFinished {
+                            id: id.clone(),
+                            name,
+                            output: out.content.clone(),
+                            is_error: out.is_error,
+                        });
+                        (id, out)
                     }
-                    out = run => out,
                 };
-                events.emit(Event::ToolCallFinished {
-                    id: id.clone(),
-                    name,
-                    output: out.content.clone(),
-                    is_error: out.is_error,
-                });
-                results.push(ContentBlock::ToolResult {
+            let outputs = if sequential {
+                let mut outputs = Vec::with_capacity(prepared.len());
+                for (id, name, input, done) in prepared {
+                    let done = done.or_else(|| {
+                        cancel
+                            .is_cancelled()
+                            .then(|| ToolOutput::error("Not executed: cancelled by user."))
+                    });
+                    outputs.push(run_one(id, name, input, done).await);
+                }
+                outputs
+            } else {
+                futures::future::join_all(
+                    prepared
+                        .into_iter()
+                        .map(|(id, name, input, done)| run_one(id, name, input, done)),
+                )
+                .await
+            };
+            cancelled |= cancel.is_cancelled();
+            let results = outputs
+                .into_iter()
+                .map(|(id, out)| ContentBlock::ToolResult {
                     tool_use_id: id,
                     content: out.content,
                     is_error: out.is_error,
-                });
-            }
+                })
+                .collect();
             session.messages.push(Message {
                 role: Role::User,
                 content: results,
@@ -604,7 +655,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         for (r, expected) in results
             .iter()
-            .zip(["Cancelled by user.", "Not executed: cancelled by user."])
+            .zip(["Cancelled by user.", "Cancelled by user."])
         {
             let ContentBlock::ToolResult {
                 content, is_error, ..
@@ -615,7 +666,7 @@ mod tests {
             assert!(*is_error);
             assert_eq!(content, expected);
         }
-        // Only the call that actually started is reported as started.
+        // Both calls ran concurrently, so both started and both were cancelled.
         let events = sink.0.lock().unwrap();
         let started = events
             .iter()
@@ -625,7 +676,7 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, Event::ToolCallFinished { .. }))
             .count();
-        assert_eq!((started, finished), (1, 1));
+        assert_eq!((started, finished), (2, 2));
         assert!(matches!(
             events.last(),
             Some(Event::TurnFinished {
@@ -806,5 +857,112 @@ mod tests {
         };
         assert!(*is_error);
         assert!(content.contains("denied"), "{content}");
+    }
+
+    /// Sleeps briefly and records how many calls were running at once.
+    struct CountingTool {
+        name: &'static str,
+        sequential: bool,
+        running: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::tool::Tool for CountingTool {
+        fn spec(&self) -> alx_protocol::ToolSpec {
+            alx_protocol::ToolSpec {
+                name: self.name.into(),
+                description: String::new(),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+
+        async fn call(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.running.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            // Later calls finish first, so ordered results prove reordering.
+            let ms = 60 - 20 * input["n"].as_u64().unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            self.running.fetch_sub(1, SeqCst);
+            ToolOutput::ok(format!("done {}", input["n"]))
+        }
+
+        fn sequential(&self) -> bool {
+            self.sequential
+        }
+    }
+
+    /// Runs three calls (the last to `last_tool`) and returns the peak
+    /// concurrency and the result texts in order.
+    async fn run_batch(sequential: bool, last_tool: &str) -> (usize, Vec<String>) {
+        let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = |name, sequential| CountingTool {
+            name,
+            sequential,
+            running: running.clone(),
+            peak: peak.clone(),
+        };
+        let call = |n: u64, name: &str| ContentBlock::ToolUse {
+            id: format!("t{n}"),
+            name: name.into(),
+            input: json!({"n": n}),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Ok(CompletionResponse {
+                content: vec![call(0, "par"), call(1, "par"), call(2, last_tool)],
+                stop_reason: StopReason::ToolUse,
+                model: None,
+                usage: None,
+                context: None,
+                compactions: Vec::new(),
+            }),
+            Ok(CompletionResponse {
+                content: vec![text("ok")],
+                stop_reason: StopReason::EndTurn,
+                model: None,
+                usage: None,
+                context: None,
+                compactions: Vec::new(),
+            }),
+        ]));
+        let mut agent = agent(provider, Arc::new(FakeExecutor::default()));
+        agent.tools = ToolRegistry::new()
+            .with(tool("par", false))
+            .with(tool("seq", sequential));
+        let mut session = Session::new("s");
+        agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &VecSink::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let results = session.messages[2]
+            .content
+            .iter()
+            .map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                _ => panic!("expected tool result"),
+            })
+            .collect();
+        (peak.load(std::sync::atomic::Ordering::SeqCst), results)
+    }
+
+    #[tokio::test]
+    async fn tool_calls_run_concurrently_and_keep_their_order() {
+        let (peak, results) = run_batch(true, "par").await;
+        assert_eq!(peak, 3);
+        assert_eq!(results, ["done 0", "done 1", "done 2"]);
+    }
+
+    #[tokio::test]
+    async fn a_sequential_tool_makes_the_batch_run_in_order() {
+        let (peak, results) = run_batch(true, "seq").await;
+        assert_eq!(peak, 1);
+        assert_eq!(results, ["done 0", "done 1", "done 2"]);
     }
 }

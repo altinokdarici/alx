@@ -62,6 +62,14 @@ history if you need it as a reference.
   other providers error). alx's own message list is never compacted, so a
   resumed or replayed session sends the full transcript to a fresh Copilot
   session. Anthropic has no compaction yet (its server-side one is beta).
+- Tool calls in one model response run concurrently: approvals are asked in
+  order first, then the approved calls run together (`join_all`) and the
+  results go back in call order. If any call's tool returns
+  `Tool::sequential()`, the whole batch runs one at a time. `write_file` and
+  `edit_file` lock the file (`tools::file_lock`, keyed by the lexically
+  normalized path) so calls on the same file run one after another. Cancelling
+  cancels every running call. Clients must match `ToolCallFinished` to its
+  `ToolCallStarted` by id, since starts and finishes interleave.
 - Tool output size: `BashTool` cuts stdout and stderr to 30000 bytes each
   (`MAX_OUTPUT_BYTES`), keeping the first quarter and last three quarters with a
   `[... N bytes truncated ...]` marker, because results are re-sent on every

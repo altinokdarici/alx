@@ -225,6 +225,9 @@ impl Tool for EditFileTool {
             Ok(e) => e,
             Err(e) => return ToolOutput::error(format!("Invalid tool call: edit_file: {e}")),
         };
+        // Held from read to write, so another call can't change the file between.
+        let lock = super::file_lock(path);
+        let _guard = lock.lock().await;
         let text = match ctx.executor.read_file(Path::new(path)).await {
             Ok(t) => t,
             Err(e) => return ToolOutput::error(format!("Could not read {path}: {e}")),
@@ -392,5 +395,41 @@ mod tests {
 
         assert!(EditFileTool.call(json!({"path": p}), &ctx).await.is_error);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_to_one_file_all_land() {
+        let ctx = ToolContext {
+            executor: Arc::new(LocalExecutor),
+        };
+        let dir = std::env::temp_dir().join(format!("alx-edit-par-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.txt");
+        let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &lines).unwrap();
+        // Different spellings of the same path share one lock.
+        let spellings = [
+            path.to_string_lossy().into_owned(),
+            dir.join("./f.txt").to_string_lossy().into_owned(),
+        ];
+
+        let calls = (0..20).map(|i| {
+            let p = spellings[i % spellings.len()].clone();
+            let ctx = &ctx;
+            async move {
+                EditFileTool
+                    .call(
+                        json!({"path": p, "old_string": format!("line {i}\n"), "new_string": format!("edited {i}\n")}),
+                        ctx,
+                    )
+                    .await
+            }
+        });
+        for out in futures::future::join_all(calls).await {
+            assert!(!out.is_error, "{}", out.content);
+        }
+        let expected: String = (0..20).map(|i| format!("edited {i}\n")).collect();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
