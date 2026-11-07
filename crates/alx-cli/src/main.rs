@@ -16,7 +16,7 @@ use agent_client_protocol::schema::v1::{
     NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
     SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions, SessionId,
-    SessionInfo, SessionNotification, SetSessionConfigOptionRequest, TextContent,
+    SessionInfo, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo};
 use alx_core::protocol::{Event, StopReason};
@@ -257,6 +257,7 @@ async fn run() -> anyhow::Result<u8> {
         renderer: Arc::new(CliRenderer::new(style, cli.verbose)),
         translator: Arc::default(),
         compacted: Arc::default(),
+        agent_commands: Arc::default(),
     };
     repl.run(transport, start).await
 }
@@ -268,6 +269,8 @@ struct Repl {
     translator: Arc<Translator>,
     /// The final word on the running `/compact`.
     compacted: Arc<Mutex<Option<CompactOutcome>>>,
+    /// Slash commands the agent advertised, for the prompt's hints.
+    agent_commands: commands::AgentCommands,
 }
 
 impl Repl {
@@ -276,6 +279,7 @@ impl Repl {
         transport: impl ConnectTo<Client> + 'static,
         start: Start,
     ) -> anyhow::Result<u8> {
+        let agent_commands = self.agent_commands.clone();
         let (renderer, translator, compacted) = (
             self.renderer.clone(),
             self.translator.clone(),
@@ -285,6 +289,13 @@ impl Repl {
             .builder()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
+                    if let SessionUpdate::AvailableCommandsUpdate(u) = &n.update {
+                        *agent_commands.lock().unwrap() = u
+                            .available_commands
+                            .iter()
+                            .map(|c| (format!("/{}", c.name), c.description.clone()))
+                            .collect();
+                    }
                     if let Some(outcome) = client::compact_outcome(&n.update) {
                         *compacted.lock().unwrap() = Some(outcome);
                     }
@@ -381,7 +392,10 @@ impl Repl {
         // the terminal's raw mode only while waiting at the prompt, so Ctrl-C
         // during a turn still arrives as a signal. Piped input is read plainly.
         let mut rl = Editor::<commands::CommandHelper, DefaultHistory>::new()?;
-        rl.set_helper(Some(commands::CommandHelper { color: style.color }));
+        rl.set_helper(Some(commands::CommandHelper {
+            color: style.color,
+            agent: self.agent_commands.clone(),
+        }));
         let mut editor = Some(rl);
 
         loop {

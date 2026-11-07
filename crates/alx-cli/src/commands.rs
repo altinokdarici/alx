@@ -1,6 +1,8 @@
 //! Slash commands for the REPL's line editor: as soon as the line starts
 //! with `/`, the matching commands show as a gray hint below it; Tab
-//! completes them and → accepts a single match.
+//! completes them and → accepts a single match. The list is the REPL's own
+//! commands plus whatever the agent advertises (`available_commands_update`),
+//! which the REPL sends to the agent as a prompt.
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -8,25 +10,32 @@ use rustyline::hint::{Hint, Hinter};
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
 
-/// The REPL's slash commands and what they do.
+/// The slash commands the REPL handles itself, and what they do.
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "start a new session (also /reset, /new)"),
-    ("/compact", "compact the conversation"),
     ("/model", "show or switch the model: /model [id]"),
     ("/provider", "show or switch the provider: /provider [name]"),
     ("/reset", "same as /clear"),
     ("/new", "same as /clear"),
 ];
 
-/// The commands starting with `line`, if it is a command being typed.
-fn matching(line: &str) -> Vec<(&'static str, &'static str)> {
+/// The agent's advertised commands as `(/name, description)`.
+pub type AgentCommands = Arc<Mutex<Vec<(String, String)>>>;
+
+/// The commands starting with `line`, if it is a command being typed: the
+/// REPL's own first, then the agent's.
+fn matching(line: &str, agent: &[(String, String)]) -> Vec<(String, String)> {
     if !line.starts_with('/') || line.contains(char::is_whitespace) {
         return Vec::new();
     }
-    COMMANDS
+    let own = COMMANDS.iter().map(|&(c, d)| (c.to_owned(), d.to_owned()));
+    let agent = agent
         .iter()
-        .copied()
+        .filter(|(c, _)| !COMMANDS.iter().any(|(o, _)| o == c))
+        .cloned();
+    own.chain(agent)
         .filter(|(c, _)| c.starts_with(line))
         .collect()
 }
@@ -34,6 +43,13 @@ fn matching(line: &str) -> Vec<(&'static str, &'static str)> {
 pub struct CommandHelper {
     /// Gray the hint (off with `NO_COLOR` / no TTY).
     pub color: bool,
+    pub agent: AgentCommands,
+}
+
+impl CommandHelper {
+    fn matching(&self, line: &str) -> Vec<(String, String)> {
+        matching(line, &self.agent.lock().unwrap())
+    }
 }
 
 impl Completer for CommandHelper {
@@ -45,11 +61,12 @@ impl Completer for CommandHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let found = matching(&line[..pos])
+        let found = self
+            .matching(&line[..pos])
             .into_iter()
             .map(|(c, _)| Pair {
-                display: c.to_owned(),
                 replacement: format!("{c} "),
+                display: c,
             })
             .collect();
         Ok((0, found))
@@ -78,7 +95,7 @@ impl Hinter for CommandHelper {
         if pos < line.len() {
             return None;
         }
-        match matching(line).as_slice() {
+        match self.matching(line).as_slice() {
             [] => None,
             // One match: the rest of it inline, which → accepts.
             [(c, d)] => Some(CommandHint {
@@ -114,10 +131,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_only_a_command_being_typed() {
-        assert_eq!(matching("/").len(), COMMANDS.len());
-        assert_eq!(matching("/mo"), vec![COMMANDS[2]]);
-        assert!(matching("/model x").is_empty());
-        assert!(matching("hello /").is_empty());
+    fn matches_own_and_agent_commands_being_typed() {
+        let agent = vec![
+            ("/compact".to_owned(), "compact".to_owned()),
+            ("/model".to_owned(), "dup".to_owned()),
+        ];
+        assert_eq!(matching("/", &agent).len(), COMMANDS.len() + 1);
+        assert_eq!(matching("/co", &agent), vec![agent[0].clone()]);
+        assert_eq!(matching("/mo", &agent)[0].1, COMMANDS[1].1);
+        assert!(matching("/model x", &agent).is_empty());
+        assert!(matching("hello /", &agent).is_empty());
     }
 }
