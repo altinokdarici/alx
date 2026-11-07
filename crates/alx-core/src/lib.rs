@@ -5,7 +5,7 @@
 //! | Layer          | Trait            | Built-in                       |
 //! |----------------|------------------|--------------------------------|
 //! | LLM backend    | [`Provider`]     | [`AnthropicProvider`], `CopilotProvider` |
-//! | Tools          | [`Tool`]         | [`BashTool`], [`ReadFileTool`], [`WriteFileTool`] |
+//! | Tools          | [`Tool`]         | [`BashTool`], [`ReadFileTool`], [`WriteFileTool`], [`EditFileTool`], [`GrepTool`], [`GlobTool`], [`ListDirTool`] |
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
 //! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`], [`FileSessionStore`] |
@@ -39,7 +39,9 @@ pub use session::{
 pub use settings::{AnthropicSettings, CopilotSettings, ProviderKind, Settings};
 pub use tool::{Approval, Tool, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
 pub use tools::bash::BashTool;
+pub use tools::edit::EditFileTool;
 pub use tools::files::{ReadFileTool, WriteFileTool};
+pub use tools::search::{GlobTool, GrepTool, ListDirTool};
 
 pub use alx_protocol as protocol;
 pub use tokio_util::sync::CancellationToken;

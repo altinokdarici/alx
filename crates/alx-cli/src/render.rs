@@ -111,7 +111,15 @@ fn call_summary(name: &str, input: &serde_json::Value) -> String {
     let arg = |key: &str| input.get(key).and_then(|v| v.as_str());
     let detail = match (name, arg("input"), arg("path")) {
         ("bash", Some(script), _) => script.to_owned(),
-        ("read_file" | "write_file", _, Some(path)) => path.to_owned(),
+        ("read_file" | "write_file" | "edit_file", _, Some(path)) => path.to_owned(),
+        ("grep" | "glob", _, path) if arg("pattern").is_some() => {
+            format!(
+                "{} in {}",
+                arg("pattern").unwrap_or(""),
+                path.unwrap_or(".")
+            )
+        }
+        ("list_dir", _, path) => path.unwrap_or(".").to_owned(),
         _ => input.to_string(),
     };
     let mut lines = detail.lines().filter(|l| !l.trim().is_empty());

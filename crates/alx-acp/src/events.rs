@@ -61,6 +61,12 @@ pub fn tool_title(name: &str, input: &serde_json::Value) -> String {
         ("bash", Some(cmd), _) => cmd.lines().next().unwrap_or("").to_string(),
         ("read_file", _, Some(path)) => format!("Read {path}"),
         ("write_file", _, Some(path)) => format!("Write {path}"),
+        ("edit_file", _, Some(path)) => format!("Edit {path}"),
+        ("grep" | "glob", _, path) => match arg("pattern") {
+            Some(p) => format!("Search {p} in {}", path.unwrap_or(".")),
+            None => name.to_string(),
+        },
+        ("list_dir", _, path) => format!("List {}", path.unwrap_or(".")),
         _ => name.to_string(),
     }
 }
@@ -69,7 +75,8 @@ pub fn tool_kind(name: &str) -> ToolKind {
     match name {
         "bash" => ToolKind::Execute,
         "read_file" => ToolKind::Read,
-        "write_file" => ToolKind::Edit,
+        "write_file" | "edit_file" => ToolKind::Edit,
+        "grep" | "glob" | "list_dir" => ToolKind::Search,
         _ => ToolKind::Other,
     }
 }

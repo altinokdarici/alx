@@ -14,7 +14,7 @@ history if you need it as a reference.
   | Layer        | Trait          | Built-in               |
   |--------------|----------------|------------------------|
   | LLM backend  | `Provider`     | `AnthropicProvider`, `CopilotProvider` |
-  | Tools        | `Tool`         | `BashTool`, `ReadFileTool`, `WriteFileTool` |
+  | Tools        | `Tool`         | `BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `GrepTool`, `GlobTool`, `ListDirTool` |
   | Where commands run | `Executor` | `LocalExecutor` (Docker/remote later) |
   | Agent loop   | `AgentLoop`    | `SingleAgent` (multi-agent later) |
   | Persistence  | `SessionStore` | `FileSessionStore`, `InMemorySessionStore` |
@@ -66,6 +66,22 @@ history if you need it as a reference.
   (`MAX_OUTPUT_BYTES`), keeping the first quarter and last three quarters with a
   `[... N bytes truncated ...]` marker, because results are re-sent on every
   request. Other tools must bound their own output.
+- `edit_file` (`tools/edit.rs`) replaces exact strings instead of rewriting a
+  file. Several `edits` in one call are all matched against the original text
+  (not the result of earlier edits), must be unique (unless `replace_all`) and
+  must not overlap; any failure leaves the file untouched. BOM and mostly-CRLF
+  line endings are kept (matched as LF). A miss that only differs in trailing
+  whitespace or typographic quotes/dashes gets a "near match at line N" hint;
+  no fuzzy replacing. Lessons taken from pi's `edit` tool.
+- `grep`, `glob`, `list_dir` (`tools/search.rs`, all `read_only`) run small
+  bash scripts through the executor (args as `$1..`, never spliced into code).
+  They prefer `rg` (`--no-config`, respects .gitignore), falling back to
+  `grep -E` / `git ls-files` / `find`. `grep` searches from inside a directory
+  so `glob` filters are relative to it, then re-prefixes paths; it caps
+  matches (`limit`, default 100), line length and bytes. `glob` matches a
+  pattern without `/` against file names at any depth, else the relative path
+  (`globset`). The fallbacks are tested by running the tests with no `rg` on
+  `PATH`.
 - `./AGENTS.md` in the working directory, if present, is appended to the system
   prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
 - Sessions are saved after every turn by `FileSessionStore` (one JSONL file per
