@@ -49,10 +49,12 @@ impl AgentFactory for SettingsAgentFactory {
         all
     }
 
-    fn build(&self, provider: &str) -> anyhow::Result<Arc<dyn AgentLoop>> {
+    fn build(&self, provider: &str, model: Option<&str>) -> anyhow::Result<Arc<dyn AgentLoop>> {
         let kind: ProviderKind = provider.parse()?;
         let mut settings = self.0.clone();
-        if kind != settings.provider_kind() {
+        if let Some(model) = model {
+            settings.model = Some(model.to_owned());
+        } else if kind != settings.provider_kind() {
             settings.model = None;
         }
         settings.provider = Some(kind);
@@ -149,14 +151,16 @@ mod tests {
         });
         assert_eq!(factory.providers()[0], "copilot");
         assert!(factory.providers().contains(&"anthropic".to_owned()));
-        let info = |p| factory.build(p).unwrap().provider_info().unwrap();
+        let info = |p| factory.build(p, None).unwrap().provider_info().unwrap();
         assert_eq!(info("copilot").model.as_deref(), Some("m"));
+        let picked = factory.build("anthropic", Some("x")).unwrap();
+        assert_eq!(picked.provider_info().unwrap().model.as_deref(), Some("x"));
         // No key needed to build it; the model is the provider's own default.
         assert_eq!(
             info("anthropic").model.as_deref(),
             Some(AnthropicConfig::DEFAULT_MODEL)
         );
-        assert!(factory.build("nope").is_err());
+        assert!(factory.build("nope", None).is_err());
     }
 
     #[test]

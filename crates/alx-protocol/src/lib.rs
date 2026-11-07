@@ -125,6 +125,15 @@ pub struct ProviderInfo {
     pub model: Option<String>,
 }
 
+/// A model a provider offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// What to pass as the model setting, e.g. `claude-opus-5-5`.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+}
+
 /// Token counts for one or more model requests. Anthropic reports
 /// `input_tokens` separately from cached tokens, so total prompt size is
 /// `input_tokens + cache_read_tokens + cache_write_tokens`.

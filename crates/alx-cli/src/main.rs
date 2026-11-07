@@ -14,8 +14,8 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, ErrorCode, InitializeRequest, ListSessionsRequest, Meta,
     NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigSelectOptions, SessionId, SessionInfo, SessionNotification,
-    SetSessionConfigOptionRequest, TextContent,
+    SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions, SessionId,
+    SessionInfo, SessionNotification, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo};
 use alx_core::protocol::{Event, StopReason};
@@ -40,7 +40,8 @@ struct Cli {
     /// --continue or --resume, switches the resumed session to it.
     #[arg(long)]
     provider: Option<ProviderKind>,
-    /// Model id for the default provider (see --provider).
+    /// Model id for the default provider (see --provider). With --continue
+    /// or --resume, switches the resumed session to it.
     #[arg(long)]
     model: Option<String>,
     /// Use this config file instead of `./alx.toml`.
@@ -93,28 +94,39 @@ fn session_line(s: &SessionInfo) -> String {
 /// session can be switched to another provider.
 enum Start {
     New,
-    Continue(Option<ProviderKind>),
-    Resume(String, Option<ProviderKind>),
+    Continue(Switch),
+    Resume(String, Switch),
     List,
 }
 
-/// The session's provider setting: its current value and the choices.
-fn provider_option(options: &[SessionConfigOption]) -> Option<(String, Vec<String>)> {
-    let option = options
-        .iter()
-        .find(|o| &*o.id.0 == alx_acp::PROVIDER_OPTION)?;
+/// What to switch a resumed session to, from --provider and --model.
+#[derive(Default)]
+struct Switch {
+    provider: Option<ProviderKind>,
+    model: Option<String>,
+}
+
+/// One choice of a select config option: its value and display name.
+struct Choice {
+    value: String,
+    name: String,
+}
+
+/// The select config option `id`: its current value and the choices.
+fn select_option(options: &[SessionConfigOption], id: &str) -> Option<(String, Vec<Choice>)> {
+    let option = options.iter().find(|o| &*o.id.0 == id)?;
     let SessionConfigKind::Select(select) = &option.kind else {
         return None;
     };
+    let choice = |o: &SessionConfigSelectOption| Choice {
+        value: o.value.0.to_string(),
+        name: o.name.clone(),
+    };
     let choices = match &select.options {
-        SessionConfigSelectOptions::Ungrouped(o) => {
-            o.iter().map(|o| o.value.0.to_string()).collect()
+        SessionConfigSelectOptions::Ungrouped(o) => o.iter().map(choice).collect(),
+        SessionConfigSelectOptions::Grouped(g) => {
+            g.iter().flat_map(|g| &g.options).map(choice).collect()
         }
-        SessionConfigSelectOptions::Grouped(g) => g
-            .iter()
-            .flat_map(|g| &g.options)
-            .map(|o| o.value.0.to_string())
-            .collect(),
         _ => Vec::new(),
     };
     Some((select.current_value.0.to_string(), choices))
@@ -129,18 +141,54 @@ struct OnProvider {
     current: String,
     choices: Vec<String>,
     model: Option<String>,
+    /// The models the provider offers (may be empty).
+    models: Vec<Choice>,
 }
 
 impl OnProvider {
     fn new(options: Option<&[SessionConfigOption]>, meta: Option<&Meta>) -> Self {
-        let (current, choices) = options
-            .and_then(provider_option)
+        let options = options.unwrap_or_default();
+        let (current, choices) = select_option(options, alx_acp::PROVIDER_OPTION)
             .unwrap_or_else(|| ("?".into(), Vec::new()));
+        let models = select_option(options, alx_acp::MODEL_OPTION)
+            .map(|(_, m)| m)
+            .unwrap_or_default();
         Self {
             current,
-            choices,
+            choices: choices.into_iter().map(|c| c.value).collect(),
             model: model_of(meta),
+            models,
         }
+    }
+
+    /// The `/model` listing: the current model, then one line per choice.
+    fn model_listing(&self) -> String {
+        let current = self.model.as_deref().unwrap_or(alx_acp::DEFAULT_MODEL);
+        let mut out = format!("model: {current}. Switch with /model <id>.");
+        let listed: Vec<_> = self
+            .models
+            .iter()
+            .filter(|m| m.value != alx_acp::DEFAULT_MODEL)
+            .collect();
+        if listed.is_empty() {
+            out.push_str(&format!(" ({} lists no models.)", self.current));
+        }
+        for m in listed {
+            let mark = if m.value == current { '*' } else { ' ' };
+            out.push_str(&format!("\n {mark} {}", m.value));
+            if m.name != m.value {
+                out.push_str(&format!("  {}", m.name));
+            }
+        }
+        out
+    }
+
+    fn switched_line(&self) -> String {
+        format!(
+            "Switched to {} · model: {}",
+            self.current,
+            self.model.as_deref().unwrap_or("provider default")
+        )
     }
 }
 
@@ -171,7 +219,10 @@ fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<u8> {
     let cli = Cli::parse();
-    let switch_to = cli.provider;
+    let switch_to = Switch {
+        provider: cli.provider,
+        model: cli.model.clone(),
+    };
     let settings = Settings::load(cli.config.as_deref())?.merge(Settings {
         provider: cli.provider,
         model: cli.model,
@@ -281,7 +332,7 @@ impl Repl {
                     .await
                     .map_err(acp)?;
                 let on = OnProvider::new(new.config_options.as_deref(), new.meta.as_ref());
-                (new.session_id, None, on, None)
+                (new.session_id, None, on, Switch::default())
             }
             Start::Continue(switch_to) => {
                 let latest = list_sessions(&cx, Some(dir.clone()))
@@ -300,10 +351,15 @@ impl Repl {
             }
         };
         let (session, resumed, mut on, switch_to) = opened;
-        if let Some(to) = switch_to.map(|k| k.to_string())
+        if let Some(to) = switch_to.provider.map(|k| k.to_string())
             && to != on.current
         {
-            on = set_provider(&cx, &session, &to).await?;
+            on = set_option(&cx, &session, alx_acp::PROVIDER_OPTION, &to).await?;
+        }
+        if let Some(to) = switch_to.model
+            && on.model.as_deref() != Some(&to)
+        {
+            on = set_option(&cx, &session, alx_acp::MODEL_OPTION, &to).await?;
         }
         println!(
             "{}",
@@ -362,17 +418,23 @@ impl Repl {
                             on.choices.join(", ")
                         ))
                     ),
-                    to => match set_provider(&cx, &session, to).await {
+                    to => match set_option(&cx, &session, alx_acp::PROVIDER_OPTION, to).await {
                         Ok(now) => {
                             on = now;
-                            println!(
-                                "{}",
-                                style.dim(&format!(
-                                    "Switched to {} · model: {}",
-                                    on.current,
-                                    on.model.as_deref().unwrap_or("provider default")
-                                ))
-                            );
+                            println!("{}", style.dim(&on.switched_line()));
+                        }
+                        Err(e) => eprintln!("{}", render::error_line(style, &format!("{e:#}"))),
+                    },
+                }
+                continue;
+            }
+            if input == "/model" || input.starts_with("/model ") {
+                match input["/model".len()..].trim() {
+                    "" => println!("{}", style.dim(&on.model_listing())),
+                    to => match set_option(&cx, &session, alx_acp::MODEL_OPTION, to).await {
+                        Ok(now) => {
+                            on = now;
+                            println!("{}", style.dim(&on.switched_line()));
                         }
                         Err(e) => eprintln!("{}", render::error_line(style, &format!("{e:#}"))),
                     },
@@ -471,17 +533,19 @@ async fn list_sessions(
     }
 }
 
-/// Switches the session to `provider` with `session/set_config_option`.
-async fn set_provider(
+/// Sets the session's config option `id` (provider or model) to `value`
+/// with `session/set_config_option`.
+async fn set_option(
     cx: &ConnectionTo<Agent>,
     session: &SessionId,
-    provider: &str,
+    id: &'static str,
+    value: &str,
 ) -> anyhow::Result<OnProvider> {
     let reply = cx
         .send_request(SetSessionConfigOptionRequest::new(
             session.clone(),
-            alx_acp::PROVIDER_OPTION,
-            provider,
+            id,
+            value,
         ))
         .block_task()
         .await

@@ -6,7 +6,8 @@ pub mod anthropic;
 pub mod copilot;
 
 use alx_protocol::{
-    Compaction, ContentBlock, ContextUsage, Message, ProviderInfo, StopReason, ToolSpec, Usage,
+    Compaction, ContentBlock, ContextUsage, Message, ModelInfo, ProviderInfo, StopReason, ToolSpec,
+    Usage,
 };
 use async_trait::async_trait;
 
@@ -44,6 +45,11 @@ pub trait Provider: Send + Sync {
     /// can't compact return an error (the default).
     async fn compact(&self) -> anyhow::Result<Option<Compaction>> {
         anyhow::bail!("the {} provider cannot compact", self.info().name)
+    }
+
+    /// The models this provider offers. Empty (the default) if it can't say.
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(Vec::new())
     }
 
     /// Like [`complete`](Self::complete), but calls `on_text` with each piece

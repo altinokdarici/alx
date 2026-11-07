@@ -21,8 +21,8 @@
 
 use super::{CompletionRequest, CompletionResponse, Provider};
 use alx_protocol::{
-    Compaction, ContentBlock, ContextUsage, Message, ProviderInfo, Role, StopReason, ToolSpec,
-    Usage,
+    Compaction, ContentBlock, ContextUsage, Message, ModelInfo, ProviderInfo, Role, StopReason,
+    ToolSpec, Usage,
 };
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
@@ -318,6 +318,21 @@ impl Provider for CopilotProvider {
             *state = State::default();
         }
         result
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        let client = self.client(&mut *self.state.lock().await).await?;
+        let models = client
+            .list_models()
+            .await
+            .context("listing Copilot models")?;
+        Ok(models
+            .into_iter()
+            .map(|m| ModelInfo {
+                id: m.id,
+                name: m.name,
+            })
+            .collect())
     }
 
     async fn compact(&self) -> anyhow::Result<Option<Compaction>> {

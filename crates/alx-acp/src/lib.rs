@@ -31,15 +31,21 @@ pub const MODEL_META: &str = "model";
 /// Id of the session config option that picks the provider.
 pub const PROVIDER_OPTION: &str = "provider";
 
+/// Id of the session config option that picks the model.
+pub const MODEL_OPTION: &str = "model";
+
+/// Value of [`MODEL_OPTION`] meaning "the provider's default model".
+pub const DEFAULT_MODEL: &str = "default";
+
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
     ClientCapabilities, CompactionStatus, CompactionUpdate, ContentBlock, Implementation,
     InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
     LoadSessionResponse, Meta, NewSessionRequest, NewSessionResponse, PromptRequest,
     PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigOption, SessionConfigSelectOption, SessionId, SessionListCapabilities,
-    SessionNotification, SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Usage as AcpUsage,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
+    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Usage as AcpUsage,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use alx_core::protocol::{Compaction, Event, Message, Usage};
@@ -71,9 +77,14 @@ struct Server {
 }
 
 impl Server {
-    /// Builds the agent for `provider` (the default if `None`), checking
-    /// that it is one of ours.
-    fn build(&self, provider: Option<&str>) -> Result<(String, Arc<dyn AgentLoop>), Error> {
+    /// Builds the agent for `provider` (the default if `None`) on `model`
+    /// (the configured one if `None`), checking the provider is one of ours.
+    /// The model is not checked here.
+    fn build(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<(String, Arc<dyn AgentLoop>), Error> {
         let providers = self.agents.providers();
         let provider = match provider {
             Some(p) if providers.iter().any(|q| q == p) => p.to_owned(),
@@ -90,16 +101,17 @@ impl Server {
         };
         let agent = self
             .agents
-            .build(&provider)
+            .build(&provider, model)
             .map_err(|e| Error::internal_error().data(format!("{e:#}")))?;
         Ok((provider, agent))
     }
 
     /// Opens `session` on its provider. Returns its config options and the
     /// `_meta` (model) to put in the reply.
-    fn open(&self, mut session: Session) -> Result<(Vec<SessionConfigOption>, Meta), Error> {
-        let (provider, agent) = self.build(session.provider.as_deref())?;
-        let opened = self.opened(&provider, &*agent);
+    async fn open(&self, mut session: Session) -> Result<(Vec<SessionConfigOption>, Meta), Error> {
+        let (provider, agent) =
+            self.build(session.provider.as_deref(), session.model.as_deref())?;
+        let opened = self.opened(&provider, &*agent).await;
         session.provider = Some(provider);
         let id = session.id.clone();
         let live = Arc::new(Live {
@@ -112,8 +124,13 @@ impl Server {
         Ok(opened)
     }
 
-    /// The config options of a session on `provider`, and its model as `_meta`.
-    fn opened(&self, provider: &str, agent: &dyn AgentLoop) -> (Vec<SessionConfigOption>, Meta) {
+    /// The config options of a session on `provider` (the provider, and the
+    /// model with the ones the provider lists), and its model as `_meta`.
+    async fn opened(
+        &self,
+        provider: &str,
+        agent: &dyn AgentLoop,
+    ) -> (Vec<SessionConfigOption>, Meta) {
         let options = self
             .agents
             .providers()
@@ -123,11 +140,33 @@ impl Server {
         let option =
             SessionConfigOption::select(PROVIDER_OPTION, "Provider", provider.to_owned(), options)
                 .description("The LLM backend the session runs on");
+        let model = agent.provider_info().and_then(|i| i.model);
+        // Listing may need a key or a running CLI; without it the option
+        // still offers the current model.
+        let listed = agent.list_models().await.unwrap_or_default();
+        let current = model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let mut models = Vec::new();
+        if !listed.iter().any(|m| m.id == current) {
+            let name = if model.is_some() {
+                current.clone()
+            } else {
+                "Provider default".to_owned()
+            };
+            models.push(SessionConfigSelectOption::new(current.clone(), name));
+        }
+        models.extend(
+            listed
+                .into_iter()
+                .map(|m| SessionConfigSelectOption::new(m.id, m.name)),
+        );
+        let model_option = SessionConfigOption::select(MODEL_OPTION, "Model", current, models)
+            .category(SessionConfigOptionCategory::Model)
+            .description("The model the session uses");
         let mut meta = Meta::new();
-        if let Some(model) = agent.provider_info().and_then(|i| i.model) {
+        if let Some(model) = model {
             meta.insert(MODEL_META.into(), model.into());
         }
-        (vec![option], meta)
+        (vec![option, model_option], meta)
     }
 
     fn get(&self, id: &SessionId) -> Result<Arc<Live>, Error> {
@@ -253,16 +292,19 @@ pub async fn serve(
                     let mut session = Session::new(Session::generate_id());
                     session.cwd = Some(req.cwd.to_string_lossy().into_owned());
                     let id = SessionId::new(session.id.clone());
-                    let (options, meta) = match server.open(session) {
-                        Ok(opened) => opened,
-                        Err(e) => return responder.respond_with_error(e),
-                    };
-                    responder.respond(
-                        NewSessionResponse::new(id.clone())
-                            .config_options(options)
-                            .meta(meta),
-                    )?;
-                    cx.send_notification(SessionNotification::new(id, commands_update()))
+                    let server = server.clone();
+                    cx.clone().spawn(async move {
+                        let (options, meta) = match server.open(session).await {
+                            Ok(opened) => opened,
+                            Err(e) => return responder.respond_with_error(e),
+                        };
+                        responder.respond(
+                            NewSessionResponse::new(id.clone())
+                                .config_options(options)
+                                .meta(meta),
+                        )?;
+                        cx.send_notification(SessionNotification::new(id, commands_update()))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -285,7 +327,7 @@ pub async fn serve(
                             );
                         };
                         let messages = session.messages.clone();
-                        let (options, meta) = match server.open(session) {
+                        let (options, meta) = match server.open(session).await {
                             Ok(opened) => opened,
                             Err(e) => return responder.respond_with_error(e),
                         };
@@ -344,7 +386,7 @@ pub async fn serve(
                         };
                         // Unlike `session/load`, the client already has the history.
                         let count = session.messages.len();
-                        let (options, mut meta) = match server.open(session) {
+                        let (options, mut meta) = match server.open(session).await {
                             Ok(opened) => opened,
                             Err(e) => return responder.respond_with_error(e),
                         };
@@ -445,25 +487,50 @@ pub async fn serve(
                     let live = server.get(&req.session_id)?;
                     let server = server.clone();
                     cx.spawn(async move {
-                        if &*req.config_id.0 != PROVIDER_OPTION {
+                        let id = &*req.config_id.0;
+                        if id != PROVIDER_OPTION && id != MODEL_OPTION {
                             return responder.respond_with_error(
                                 Error::invalid_params()
-                                    .data(format!("unknown config option `{}`", req.config_id.0)),
+                                    .data(format!("unknown config option `{id}`")),
                             );
                         }
-                        // Waits for a running turn: the switch applies between turns.
-                        let mut session = live.session.lock().await;
                         let Some(value) = req.value.as_value_id() else {
                             return responder.respond_with_error(
-                                Error::invalid_params().data("`provider` takes a provider name"),
+                                Error::invalid_params().data(format!("`{id}` takes a name")),
                             );
                         };
-                        let (provider, agent) = match server.build(Some(&value.0)) {
+                        // Waits for a running turn: the switch applies between turns.
+                        let mut session = live.session.lock().await;
+                        // A new provider starts on its default model.
+                        let (provider, model) = if id == PROVIDER_OPTION {
+                            (Some(&*value.0), None)
+                        } else if &*value.0 == DEFAULT_MODEL {
+                            (session.provider.as_deref(), None)
+                        } else {
+                            (session.provider.as_deref(), Some(&*value.0))
+                        };
+                        // Check the id against the provider's list, when it has one.
+                        if let Some(model) = model {
+                            let agent = live.agent.lock().unwrap().clone();
+                            let listed = agent.list_models().await.unwrap_or_default();
+                            if !listed.is_empty() && !listed.iter().any(|m| m.id == model) {
+                                let ids: Vec<_> = listed.iter().map(|m| m.id.as_str()).collect();
+                                return responder.respond_with_error(Error::invalid_params().data(
+                                    format!(
+                                        "unknown model `{model}` (available: {})",
+                                        ids.join(", ")
+                                    ),
+                                ));
+                            }
+                        }
+                        let model = model.map(str::to_owned);
+                        let (provider, agent) = match server.build(provider, model.as_deref()) {
                             Ok(built) => built,
                             Err(e) => return responder.respond_with_error(e),
                         };
-                        let (options, meta) = server.opened(&provider, &*agent);
+                        let (options, meta) = server.opened(&provider, &*agent).await;
                         session.provider = Some(provider);
+                        session.model = model;
                         *live.agent.lock().unwrap() = agent;
                         // An empty session is not stored yet; it will be on its first turn.
                         if !session.messages.is_empty()

@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use alx_core::protocol::{
-    Compaction, ContentBlock as Block, ProviderInfo, StopReason as Stop, Usage,
+    Compaction, ContentBlock as Block, ModelInfo, ProviderInfo, StopReason as Stop, Usage,
 };
 use alx_core::{
     AgentConfig, AgentFactory, AgentLoop, BashTool, CompletionRequest, CompletionResponse,
@@ -81,7 +81,7 @@ impl AgentFactory for Fixed {
     fn providers(&self) -> Vec<String> {
         self.0.iter().map(|(n, _)| n.to_string()).collect()
     }
-    fn build(&self, provider: &str) -> anyhow::Result<Arc<dyn AgentLoop>> {
+    fn build(&self, provider: &str, _model: Option<&str>) -> anyhow::Result<Arc<dyn AgentLoop>> {
         self.0
             .iter()
             .find(|(n, _)| *n == provider)
@@ -675,6 +675,172 @@ async fn sessions_pick_and_switch_providers() {
                     .block_task()
                     .await?;
                 assert_eq!(current(&resumed.config_options.unwrap()), "two");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// One provider that offers two models and answers with the one it runs on.
+struct Models;
+
+impl AgentFactory for Models {
+    fn providers(&self) -> Vec<String> {
+        vec!["p".into()]
+    }
+    fn build(&self, _provider: &str, model: Option<&str>) -> anyhow::Result<Arc<dyn AgentLoop>> {
+        struct Echo(Option<String>);
+        #[async_trait]
+        impl Provider for Echo {
+            fn info(&self) -> ProviderInfo {
+                ProviderInfo {
+                    name: "p".into(),
+                    model: self.0.clone(),
+                }
+            }
+            async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+                Ok(["a", "b"]
+                    .map(|id| ModelInfo {
+                        id: id.into(),
+                        name: id.to_uppercase(),
+                    })
+                    .into())
+            }
+            async fn complete(&self, _: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+                Ok(reply(vec![text(self.0.as_deref().unwrap_or("none"))]))
+            }
+        }
+        Ok(Arc::new(SingleAgent {
+            config: AgentConfig::default(),
+            provider: Arc::new(Echo(model.map(str::to_owned))),
+            tools: ToolRegistry::new(),
+            tool_ctx: ToolContext {
+                executor: Arc::new(LocalExecutor),
+            },
+        }))
+    }
+}
+
+#[tokio::test]
+async fn sessions_list_and_switch_models() {
+    use agent_client_protocol::schema::v1::{
+        ErrorCode, ResumeSessionRequest, SessionConfigKind, SessionConfigOption,
+        SessionConfigSelectOptions, SetSessionConfigOptionRequest,
+    };
+    let store = Arc::new(InMemorySessionStore::default());
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let seen = updates.clone();
+    let prompt =
+        |id, t: &str| PromptRequest::new(id, vec![ContentBlock::Text(TextContent::new(t))]);
+    // The model option: its current value and the ids offered.
+    let model = |options: &[SessionConfigOption]| {
+        let o = options
+            .iter()
+            .find(|o| o.id.0.as_ref() == alx_acp::MODEL_OPTION)
+            .unwrap();
+        match &o.kind {
+            SessionConfigKind::Select(s) => {
+                let ids = match &s.options {
+                    SessionConfigSelectOptions::Ungrouped(v) => {
+                        v.iter().map(|o| o.value.0.to_string()).collect::<Vec<_>>()
+                    }
+                    _ => panic!("grouped"),
+                };
+                (s.current_value.0.to_string(), ids)
+            }
+            _ => panic!("not a select"),
+        }
+    };
+    let said = move || {
+        seen.lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|u| match u {
+                SessionUpdate::AgentMessageChunk(c) => match c.content {
+                    ContentBlock::Text(t) => Some(t.text),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    Client
+        .builder()
+        .on_receive_notification(
+            async move |n: SessionNotification, _cx| {
+                updates.lock().unwrap().push(n.update);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(
+            alx_acp::native(Arc::new(Models), store),
+            async move |cx: ConnectionTo<Agent>| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let new = cx
+                    .send_request(NewSessionRequest::new("/p"))
+                    .block_task()
+                    .await?;
+                // No model configured: the provider default comes first.
+                assert_eq!(
+                    model(&new.config_options.unwrap()),
+                    (
+                        alx_acp::DEFAULT_MODEL.into(),
+                        vec!["default".into(), "a".into(), "b".into()]
+                    )
+                );
+                let id = new.session_id;
+
+                let switched = cx
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        id.clone(),
+                        alx_acp::MODEL_OPTION,
+                        "b",
+                    ))
+                    .block_task()
+                    .await?;
+                assert_eq!(
+                    model(&switched.config_options),
+                    ("b".into(), vec!["a".into(), "b".into()])
+                );
+                assert_eq!(switched.meta.unwrap()[alx_acp::MODEL_META], "b");
+                cx.send_request(prompt(id.clone(), "hi"))
+                    .block_task()
+                    .await?;
+                assert_eq!(said(), "b");
+
+                // A model the provider doesn't list is refused.
+                let unknown = cx
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        id.clone(),
+                        alx_acp::MODEL_OPTION,
+                        "z",
+                    ))
+                    .block_task()
+                    .await
+                    .unwrap_err();
+                assert_eq!(unknown.code, ErrorCode::InvalidParams);
+
+                // The pick is stored with the session.
+                let resumed = cx
+                    .send_request(ResumeSessionRequest::new(id.clone(), "/p"))
+                    .block_task()
+                    .await?;
+                assert_eq!(model(&resumed.config_options.unwrap()).0, "b");
+
+                // Switching the provider goes back to its default model.
+                let reset = cx
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        id,
+                        alx_acp::PROVIDER_OPTION,
+                        "p",
+                    ))
+                    .block_task()
+                    .await?;
+                assert_eq!(model(&reset.config_options).0, alx_acp::DEFAULT_MODEL);
                 Ok(())
             },
         )

@@ -5,7 +5,9 @@ use crate::executor::Executor;
 use crate::provider::{CompletionRequest, Provider};
 use crate::session::Session;
 use crate::tool::{Approval, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
-use alx_protocol::{ContentBlock, Event, Message, ProviderInfo, Role, StopReason, Usage};
+use alx_protocol::{
+    ContentBlock, Event, Message, ModelInfo, ProviderInfo, Role, StopReason, Usage,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +55,11 @@ pub trait AgentLoop: Send + Sync {
     fn provider_info(&self) -> Option<ProviderInfo> {
         None
     }
+
+    /// The models the provider offers. Empty (the default) if it can't say.
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Builds agents on demand, one per provider name, so a server can give
@@ -61,8 +68,9 @@ pub trait AgentFactory: Send + Sync {
     /// The provider names [`build`](Self::build) accepts, the default first.
     fn providers(&self) -> Vec<String>;
 
-    /// A fresh agent on `provider`. Cheap: providers connect lazily.
-    fn build(&self, provider: &str) -> anyhow::Result<Arc<dyn AgentLoop>>;
+    /// A fresh agent on `provider`, on `model` if given, else the
+    /// configured default. Cheap: providers connect lazily.
+    fn build(&self, provider: &str, model: Option<&str>) -> anyhow::Result<Arc<dyn AgentLoop>>;
 }
 
 /// Per-turn overrides for [`AgentLoop::run_turn_with`].
@@ -241,6 +249,10 @@ fn mark_cancelled(session: &mut Session) -> StopReason {
 impl AgentLoop for SingleAgent {
     fn provider_info(&self) -> Option<ProviderInfo> {
         Some(self.provider.info())
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        self.provider.list_models().await
     }
 
     async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool> {

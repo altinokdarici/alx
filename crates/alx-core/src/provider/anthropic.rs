@@ -2,7 +2,7 @@
 //! into one response; the agent loop still sees a single `complete` result.
 
 use super::{CompletionRequest, CompletionResponse, Provider};
-use alx_protocol::{ContentBlock, Message, ProviderInfo, Role, Usage};
+use alx_protocol::{ContentBlock, Message, ModelInfo, ProviderInfo, Role, Usage};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -68,6 +68,20 @@ impl AnthropicProvider {
             "tools": tools,
         })
     }
+}
+
+/// The `data` of a `GET /v1/models` reply.
+fn models_from_wire(body: &Value) -> Vec<ModelInfo> {
+    body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?.to_owned();
+            let name = m["display_name"].as_str().unwrap_or(&id).to_owned();
+            Some(ModelInfo { id, name })
+        })
+        .collect()
 }
 
 fn message_to_wire(m: &Message) -> Value {
@@ -286,6 +300,29 @@ impl Provider for AnthropicProvider {
             name: "anthropic".into(),
             model: Some(self.config.model.clone()),
         }
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        if self.config.api_key.is_empty() {
+            bail!("CLAUDE_API_KEY environment variable is not set");
+        }
+        let url = format!("{}/v1/models", self.config.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .get(url)
+            .query(&[("limit", "1000")])
+            .header("x-api-key", &self.config.api_key)
+            .header("anthropic-version", &self.config.api_version)
+            .send()
+            .await
+            .context("listing Anthropic models")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("listing Anthropic models failed ({status}): {body}");
+        }
+        let body: Value = resp.json().await.context("bad model list")?;
+        Ok(models_from_wire(&body))
     }
 
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {

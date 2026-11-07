@@ -90,7 +90,13 @@ history if you need it as a reference.
   resume replies, model in `_meta.model`); `session/set_config_option` switches it
   between turns and the choice is saved with the session. The CLI's
   `/provider [name]` shows or switches it, and `--provider` with `--continue` /
-  `--resume` switches the resumed session.
+  `--resume` switches the resumed session. Likewise a `model` select option
+  (category `model`) lists `Provider::list_models` (Copilot: the SDK's model
+  list; Anthropic: `GET /v1/models`, needs the key), with `default` meaning the
+  provider's default. Setting it rebuilds the agent with
+  `AgentFactory::build(provider, Some(model))`, refuses ids the provider doesn't
+  list (any id if it lists none), and saves `Session.model`; switching provider
+  resets it. The CLI has `/model [id]`, and `--model` switches a resumed session.
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history;
   `session/list` (paged, optional `cwd` filter; message count in

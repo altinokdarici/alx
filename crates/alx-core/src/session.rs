@@ -30,6 +30,9 @@ pub struct Session {
     /// The provider the session last ran on (e.g. `anthropic`), so it
     /// resumes on the same one. `None` means the default.
     pub provider: Option<String>,
+    /// The model picked for this session. `None` means the provider's
+    /// default (or the configured one).
+    pub model: Option<String>,
 }
 
 impl Session {
@@ -42,6 +45,7 @@ impl Session {
             updated_at: now,
             cwd: None,
             provider: None,
+            model: None,
         }
     }
 
@@ -150,6 +154,8 @@ struct Header {
     cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 /// One JSONL file per session in a directory: a header line, then one
@@ -192,6 +198,7 @@ fn parse(text: &str) -> anyhow::Result<Session> {
         updated_at: header.updated_at,
         cwd: header.cwd,
         provider: header.provider,
+        model: header.model,
     })
 }
 
@@ -202,6 +209,7 @@ fn render(session: &Session, updated_at: u64) -> anyhow::Result<String> {
         updated_at,
         cwd: session.cwd.clone(),
         provider: session.provider.clone(),
+        model: session.model.clone(),
     })?;
     out.push('\n');
     for m in &session.messages {
@@ -293,6 +301,7 @@ mod tests {
         let mut s = Session::new(id);
         s.cwd = Some("/proj".into());
         s.provider = Some("copilot".into());
+        s.model = Some("gpt-5".into());
         s.messages.push(Message::user_text(text));
         s.messages.push(Message {
             role: Role::Assistant,
@@ -318,6 +327,7 @@ mod tests {
         assert_eq!(loaded.messages, s.messages);
         assert_eq!(loaded.cwd, s.cwd);
         assert_eq!(loaded.provider, s.provider);
+        assert_eq!(loaded.model, s.model);
         assert_eq!(loaded.created_at, s.created_at);
         assert!(store.load("missing").await.unwrap().is_none());
         // Saving again overwrites rather than duplicating.
