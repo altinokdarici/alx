@@ -99,6 +99,8 @@ history if you need it as a reference.
   resets it. The CLI has `/model [id]`, and `--model` switches a resumed session.
   The CLI's `/clear` (aliases `/reset`, `/new`) starts a new ACP session on the
   same provider and model; the old one stays stored and resumable.
+  Typing `/` at the prompt lists the slash commands as a gray hint
+  (`alx-cli/src/commands.rs`, a rustyline helper); Tab completes, → accepts.
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history;
   `session/list` (paged, optional `cwd` filter; message count in

@@ -6,6 +6,7 @@
 //! input and renders the updates in `CliRenderer`.
 
 mod client;
+mod commands;
 mod markdown;
 mod render;
 
@@ -26,8 +27,9 @@ use alx_core::{
 use clap::Parser;
 use client::{CompactOutcome, Translator};
 use render::{CliRenderer, Style};
-use rustyline::DefaultEditor;
+use rustyline::Editor;
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -378,7 +380,9 @@ impl Repl {
         // Line editing (arrows, Home/End, Up/Down history). It reads stdin in
         // the terminal's raw mode only while waiting at the prompt, so Ctrl-C
         // during a turn still arrives as a signal. Piped input is read plainly.
-        let mut editor = Some(DefaultEditor::new()?);
+        let mut rl = Editor::<commands::CommandHelper, DefaultHistory>::new()?;
+        rl.set_helper(Some(commands::CommandHelper { color: style.color }));
+        let mut editor = Some(rl);
 
         loop {
             let prompt_text = render::prompt(style);
