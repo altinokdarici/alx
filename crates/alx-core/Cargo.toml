@@ -3,6 +3,7 @@ name = "alx-core"
 description = "alx agent loop, pluggable traits and built-in implementations."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

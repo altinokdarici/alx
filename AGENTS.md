@@ -125,6 +125,9 @@ history if you need it as a reference.
 
 ## Working on it
 
+- The toolchain is pinned in `rust-toolchain.toml` (Rust 1.99.1, with rustfmt and
+  clippy); rustup installs it on first use, and CI uses the same one. Bump it there
+  and in the workspace `rust-version`.
 - `cargo test` must pass. Core logic is tested with fake `Provider`/`Executor`
   implementations, with no network needed.
 - `cargo clippy --all-targets` and `cargo fmt` must both be clean.

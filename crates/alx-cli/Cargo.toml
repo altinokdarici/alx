@@ -3,6 +3,7 @@ name = "alx-cli"
 description = "alx interactive CLI: a line-based REPL on top of alx-core."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
