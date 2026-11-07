@@ -350,7 +350,7 @@ impl Repl {
                 (id, Some(count), on, switch_to)
             }
         };
-        let (session, resumed, mut on, switch_to) = opened;
+        let (mut session, resumed, mut on, switch_to) = opened;
         if let Some(to) = switch_to.provider.map(|k| k.to_string())
             && to != on.current
         {
@@ -368,7 +368,7 @@ impl Repl {
         if let Some(count) = resumed {
             println!("Resumed session {} ({count} messages)", session.0);
         }
-        let prompt = |text: &str| {
+        let prompt = |session: &SessionId, text: &str| {
             cx.send_request(PromptRequest::new(
                 session.clone(),
                 vec![ContentBlock::Text(TextContent::new(text))],
@@ -428,6 +428,20 @@ impl Repl {
                 }
                 continue;
             }
+            if matches!(input, "/clear" | "/reset" | "/new") {
+                match reset(&cx, &on).await {
+                    Ok((id, now)) => {
+                        session = id;
+                        on = now;
+                        println!(
+                            "{}",
+                            style.dim(&format!("Started a new session {}.", session.0))
+                        );
+                    }
+                    Err(e) => eprintln!("{}", render::error_line(style, &format!("{e:#}"))),
+                }
+                continue;
+            }
             if input == "/model" || input.starts_with("/model ") {
                 match input["/model".len()..].trim() {
                     "" => println!("{}", style.dim(&on.model_listing())),
@@ -443,7 +457,7 @@ impl Repl {
             }
             if input == "/compact" {
                 *self.compacted.lock().unwrap() = None;
-                if let Err(e) = prompt(input).await {
+                if let Err(e) = prompt(&session, input).await {
                     eprintln!("{}", render::error_line(style, &e.to_string()));
                 }
                 match self.compacted.lock().unwrap().take() {
@@ -464,7 +478,7 @@ impl Repl {
             // for it to wind down and exits.
             let mut cancelled = false;
             let result = {
-                let turn = prompt(input);
+                let turn = prompt(&session, input);
                 tokio::pin!(turn);
                 loop {
                     tokio::select! {
@@ -531,6 +545,29 @@ async fn list_sessions(
             None => return Ok(all),
         }
     }
+}
+
+/// Starts a new session in the current directory on the same provider and
+/// model as `on`. The old one stays stored and can be resumed.
+async fn reset(
+    cx: &ConnectionTo<Agent>,
+    on: &OnProvider,
+) -> anyhow::Result<(SessionId, OnProvider)> {
+    let new = cx
+        .send_request(NewSessionRequest::new(std::env::current_dir()?))
+        .block_task()
+        .await
+        .map_err(acp)?;
+    let id = new.session_id;
+    let mut now = OnProvider::new(new.config_options.as_deref(), new.meta.as_ref());
+    if now.current != on.current {
+        now = set_option(cx, &id, alx_acp::PROVIDER_OPTION, &on.current).await?;
+    }
+    if now.model != on.model {
+        let model = on.model.as_deref().unwrap_or(alx_acp::DEFAULT_MODEL);
+        now = set_option(cx, &id, alx_acp::MODEL_OPTION, model).await?;
+    }
+    Ok((id, now))
 }
 
 /// Sets the session's config option `id` (provider or model) to `value`
