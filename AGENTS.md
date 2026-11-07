@@ -101,7 +101,9 @@ history if you need it as a reference.
   same provider and model; the old one stays stored and resumable.
   Typing `/` at the prompt lists the slash commands as a gray hint
   (`alx-cli/src/commands.rs`, a rustyline helper): its own commands plus the
-  agent's `available_commands_update`. Tab completes, → accepts.
+  agent's `available_commands_update`. Tab completes, → accepts. After `/model `
+  or `/provider `, values match any part of their id or name (`opu`), and Enter
+  takes a unique partial match (`commands::resolve`).
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history;
   `session/list` (paged, optional `cwd` filter; message count in

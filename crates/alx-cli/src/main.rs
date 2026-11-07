@@ -185,6 +185,21 @@ impl OnProvider {
         out
     }
 
+    /// The models as `(id, name)`, for completion.
+    fn model_items(&self) -> Vec<commands::Item> {
+        self.models
+            .iter()
+            .map(|m| (m.value.clone(), m.name.clone()))
+            .collect()
+    }
+
+    fn provider_items(&self) -> Vec<commands::Item> {
+        self.choices
+            .iter()
+            .map(|p| (p.clone(), p.clone()))
+            .collect()
+    }
+
     fn switched_line(&self) -> String {
         format!(
             "Switched to {} · model: {}",
@@ -257,7 +272,7 @@ async fn run() -> anyhow::Result<u8> {
         renderer: Arc::new(CliRenderer::new(style, cli.verbose)),
         translator: Arc::default(),
         compacted: Arc::default(),
-        agent_commands: Arc::default(),
+        known: Arc::default(),
     };
     repl.run(transport, start).await
 }
@@ -269,8 +284,8 @@ struct Repl {
     translator: Arc<Translator>,
     /// The final word on the running `/compact`.
     compacted: Arc<Mutex<Option<CompactOutcome>>>,
-    /// Slash commands the agent advertised, for the prompt's hints.
-    agent_commands: commands::AgentCommands,
+    /// What the prompt's hints offer (agent commands, models, providers).
+    known: commands::SharedKnown,
 }
 
 impl Repl {
@@ -279,7 +294,7 @@ impl Repl {
         transport: impl ConnectTo<Client> + 'static,
         start: Start,
     ) -> anyhow::Result<u8> {
-        let agent_commands = self.agent_commands.clone();
+        let known = self.known.clone();
         let (renderer, translator, compacted) = (
             self.renderer.clone(),
             self.translator.clone(),
@@ -290,7 +305,7 @@ impl Repl {
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
                     if let SessionUpdate::AvailableCommandsUpdate(u) = &n.update {
-                        *agent_commands.lock().unwrap() = u
+                        known.lock().unwrap().agent_commands = u
                             .available_commands
                             .iter()
                             .map(|c| (format!("/{}", c.name), c.description.clone()))
@@ -394,11 +409,17 @@ impl Repl {
         let mut rl = Editor::<commands::CommandHelper, DefaultHistory>::new()?;
         rl.set_helper(Some(commands::CommandHelper {
             color: style.color,
-            agent: self.agent_commands.clone(),
+            known: self.known.clone(),
         }));
         let mut editor = Some(rl);
 
         loop {
+            // The values `/model` and `/provider` complete to, as of now.
+            {
+                let mut known = self.known.lock().unwrap();
+                known.values.insert("/model", on.model_items());
+                known.values.insert("/provider", on.provider_items());
+            }
             let prompt_text = render::prompt(style);
             let mut rl = editor.take().expect("editor is put back after each read");
             let (rl, read) = tokio::task::spawn_blocking(move || {
@@ -436,7 +457,13 @@ impl Repl {
                             on.choices.join(", ")
                         ))
                     ),
-                    to => match set_option(&cx, &session, alx_acp::PROVIDER_OPTION, to).await {
+                    to => match async {
+                        let to = commands::resolve(to, &on.provider_items())
+                            .map_err(anyhow::Error::msg)?;
+                        set_option(&cx, &session, alx_acp::PROVIDER_OPTION, &to).await
+                    }
+                    .await
+                    {
                         Ok(now) => {
                             on = now;
                             println!("{}", style.dim(&on.switched_line()));
@@ -463,7 +490,13 @@ impl Repl {
             if input == "/model" || input.starts_with("/model ") {
                 match input["/model".len()..].trim() {
                     "" => println!("{}", style.dim(&on.model_listing())),
-                    to => match set_option(&cx, &session, alx_acp::MODEL_OPTION, to).await {
+                    to => match async {
+                        let to =
+                            commands::resolve(to, &on.model_items()).map_err(anyhow::Error::msg)?;
+                        set_option(&cx, &session, alx_acp::MODEL_OPTION, &to).await
+                    }
+                    .await
+                    {
                         Ok(now) => {
                             on = now;
                             println!("{}", style.dim(&on.switched_line()));
