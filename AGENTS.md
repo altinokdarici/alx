@@ -104,6 +104,9 @@ history if you need it as a reference.
   agent's `available_commands_update`. Tab completes, → accepts. After `/model `
   or `/provider `, values match any part of their id or name (`opu`), and Enter
   takes a unique partial match (`commands::resolve`).
+  A bare `/model` or `/provider` on a terminal opens an inline picker
+  (`alx-cli/src/picker.rs`, crossterm raw mode): ↑/↓ move, typing filters,
+  Enter picks, Esc cancels; off a terminal it prints the listing instead.
   `Event`s map to `session/update` (text deltas, tool calls, context usage);
   `session/cancel` cancels the turn's token; `session/load` replays history;
   `session/list` (paged, optional `cwd` filter; message count in

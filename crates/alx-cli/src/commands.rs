@@ -179,7 +179,7 @@ fn hint_for(typed: &str, found: &[Item]) -> Option<CommandHint> {
                 .collect();
             if many.len() > MAX_SHOWN {
                 display.push_str(&format!(
-                    "\n  … {} more (keep typing to narrow; Enter on the bare command lists all)",
+                    "\n  … {} more (keep typing to narrow; Enter on the bare command opens a picker)",
                     many.len() - MAX_SHOWN
                 ));
             }

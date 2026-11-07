@@ -8,6 +8,7 @@
 mod client;
 mod commands;
 mod markdown;
+mod picker;
 mod render;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -139,6 +140,26 @@ fn model_of(meta: Option<&Meta>) -> Option<String> {
 }
 
 /// What the REPL shows about the session's provider.
+/// Shows the arrow-key picker when stdin and stdout are terminals.
+/// `None`: not interactive (caller falls back to a listing);
+/// `Some(None)`: cancelled.
+async fn choose(
+    title: &str,
+    items: Vec<commands::Item>,
+    current: Option<&str>,
+    style: &Style,
+) -> Option<Option<String>> {
+    use std::io::IsTerminal;
+    if items.is_empty() || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return None;
+    }
+    let (title, current, color) = (title.to_string(), current.map(str::to_string), style.color);
+    tokio::task::spawn_blocking(move || picker::pick(&title, items, current.as_deref(), color))
+        .await
+        .ok()?
+        .ok()
+}
+
 struct OnProvider {
     current: String,
     choices: Vec<String>,
@@ -448,7 +469,18 @@ impl Repl {
                 continue;
             }
             if input == "/provider" || input.starts_with("/provider ") {
-                match input["/provider".len()..].trim() {
+                let arg = input["/provider".len()..].trim();
+                let arg = match arg {
+                    "" => match choose("Provider", on.provider_items(), Some(&on.current), style)
+                        .await
+                    {
+                        Some(Some(p)) => p,
+                        Some(None) => continue,
+                        None => String::new(),
+                    },
+                    a => a.to_string(),
+                };
+                match arg.as_str() {
                     "" => println!(
                         "{}",
                         style.dim(&format!(
@@ -488,7 +520,23 @@ impl Repl {
                 continue;
             }
             if input == "/model" || input.starts_with("/model ") {
-                match input["/model".len()..].trim() {
+                let arg = input["/model".len()..].trim();
+                let listed: Vec<_> = on
+                    .model_items()
+                    .into_iter()
+                    .filter(|(v, _)| v != alx_acp::DEFAULT_MODEL)
+                    .collect();
+                let arg = match arg {
+                    "" if !listed.is_empty() => {
+                        match choose("Model", listed, on.model.as_deref(), style).await {
+                            Some(Some(m)) => m,
+                            Some(None) => continue,
+                            None => String::new(),
+                        }
+                    }
+                    a => a.to_string(),
+                };
+                match arg.as_str() {
                     "" => println!("{}", style.dim(&on.model_listing())),
                     to => match async {
                         let to =

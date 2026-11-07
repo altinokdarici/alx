@@ -21,3 +21,4 @@ tokio.workspace = true
 rustyline = { version = "14", default-features = false }
 terminal_size = "0.4"
 pulldown-cmark = { version = "0.13", default-features = false }
+crossterm = { version = "0.28", default-features = false, features = ["events"] }
