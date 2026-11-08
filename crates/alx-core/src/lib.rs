@@ -20,6 +20,7 @@ pub mod context;
 pub mod env;
 pub mod event;
 pub mod executor;
+pub mod pricing;
 pub mod provider;
 pub mod session;
 pub mod settings;
