@@ -4,7 +4,7 @@
 use crate::{
     AgentConfig, AgentFactory, AgentLoop, AnthropicConfig, AnthropicProvider, BashTool,
     EditFileTool, GlobTool, GrepTool, ListDirTool, LocalExecutor, Provider, ProviderKind,
-    ReadFileTool, Settings, SingleAgent, ToolContext, ToolRegistry, WriteFileTool,
+    ReadFileTool, Settings, SingleAgent, ToolContext, ToolRegistry, WebFetchTool, WriteFileTool,
 };
 use std::sync::Arc;
 
@@ -33,7 +33,8 @@ pub fn agent_from_settings(settings: &Settings) -> anyhow::Result<SingleAgent> {
             .with(EditFileTool)
             .with(GrepTool)
             .with(GlobTool)
-            .with(ListDirTool),
+            .with(ListDirTool)
+            .with(WebFetchTool::default()),
         tool_ctx: ToolContext {
             executor: Arc::new(LocalExecutor),
         },
