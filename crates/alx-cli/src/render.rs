@@ -120,6 +120,16 @@ fn call_summary(name: &str, input: &serde_json::Value) -> String {
             )
         }
         ("list_dir", _, path) => path.unwrap_or(".").to_owned(),
+        ("web_fetch", _, _) if arg("url").is_some() => arg("url").unwrap_or("").to_owned(),
+        ("todo_write", _, _) => {
+            let todos = input.get("todos").and_then(|t| t.as_array());
+            let done = todos.map_or(0, |t| {
+                t.iter()
+                    .filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("completed"))
+                    .count()
+            });
+            format!("{done}/{} done", todos.map_or(0, Vec::len))
+        }
         _ => input.to_string(),
     };
     let mut lines = detail.lines().filter(|l| !l.trim().is_empty());
@@ -236,12 +246,17 @@ impl Renderer {
             }
             Event::ToolCallFinished {
                 id,
+                name,
                 output,
                 is_error,
-                ..
             } => {
                 let call = st.running.remove(id);
-                let finished = self.finished(output, *is_error);
+                let mut finished = self.finished(output, *is_error);
+                // The task list is worth seeing even without `--verbose`.
+                if !*is_error && !self.verbose && name == "todo_write" {
+                    finished.push_str(&indent(output, "    "));
+                    finished.push('\n');
+                }
                 if st.open_call.take().as_ref() == Some(id) {
                     Some(finished)
                 } else {

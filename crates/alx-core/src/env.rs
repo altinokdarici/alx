@@ -1,6 +1,7 @@
 //! Building an agent from [`Settings`], plus the `.env` loader. Kept in the core rather
 //! than in a binary so every client is wired the same way.
 
+use crate::TodoWriteTool;
 use crate::{
     AgentConfig, AgentFactory, AgentLoop, AnthropicConfig, AnthropicProvider, BashTool,
     EditFileTool, GlobTool, GrepTool, ListDirTool, LocalExecutor, Provider, ProviderKind,
@@ -34,7 +35,8 @@ pub fn agent_from_settings(settings: &Settings) -> anyhow::Result<SingleAgent> {
             .with(GrepTool)
             .with(GlobTool)
             .with(ListDirTool)
-            .with(WebFetchTool::default()),
+            .with(WebFetchTool::default())
+            .with(TodoWriteTool),
         tool_ctx: ToolContext {
             executor: Arc::new(LocalExecutor),
         },

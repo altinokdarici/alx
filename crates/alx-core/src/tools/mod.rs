@@ -4,6 +4,7 @@ pub mod bash;
 pub mod edit;
 pub mod files;
 pub mod search;
+pub mod todo;
 pub mod web;
 
 use std::collections::HashMap;

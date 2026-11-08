@@ -5,7 +5,7 @@
 //! | Layer          | Trait            | Built-in                       |
 //! |----------------|------------------|--------------------------------|
 //! | LLM backend    | [`Provider`]     | [`AnthropicProvider`], `CopilotProvider` |
-//! | Tools          | [`Tool`]         | [`BashTool`], [`ReadFileTool`], [`WriteFileTool`], [`EditFileTool`], [`GrepTool`], [`GlobTool`], [`ListDirTool`], [`WebFetchTool`] |
+//! | Tools          | [`Tool`]         | [`BashTool`], [`ReadFileTool`], [`WriteFileTool`], [`EditFileTool`], [`GrepTool`], [`GlobTool`], [`ListDirTool`], [`WebFetchTool`], [`TodoWriteTool`] |
 //! | Command runner | [`Executor`]     | [`LocalExecutor`]              |
 //! | Agent loop     | [`AgentLoop`]    | [`SingleAgent`]                |
 //! | Persistence    | [`SessionStore`] | [`InMemorySessionStore`], [`FileSessionStore`] |
@@ -45,6 +45,7 @@ pub use tools::bash::BashTool;
 pub use tools::edit::EditFileTool;
 pub use tools::files::{ReadFileTool, WriteFileTool};
 pub use tools::search::{GlobTool, GrepTool, ListDirTool};
+pub use tools::todo::TodoWriteTool;
 pub use tools::web::WebFetchTool;
 
 pub use alx_protocol as protocol;

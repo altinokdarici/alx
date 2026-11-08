@@ -1,9 +1,10 @@
 //! alx `Event`s to ACP `session/update` notifications.
 
 use agent_client_protocol::schema::v1::{
-    CompactionStatus, CompactionUpdate, ContentBlock, ContentChunk, Meta, SessionId,
-    SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+    CompactionStatus, CompactionUpdate, ContentBlock, ContentChunk, Meta, Plan, PlanEntry,
+    PlanEntryPriority, PlanEntryStatus, SessionId, SessionNotification, SessionUpdate, TextContent,
+    ToolCall, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    UsageUpdate,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use alx_core::EventSink;
@@ -146,6 +147,11 @@ impl EventSink for AcpSink {
                 }
             }
             Event::ToolCallStarted { id, name, input } => {
+                if name == "todo_write"
+                    && let Ok(todos) = alx_core::tools::todo::parse_todos(&input)
+                {
+                    self.send(SessionUpdate::Plan(plan(&todos)));
+                }
                 let call = ToolCall::new(id, tool_title(&name, &input))
                     .kind(tool_kind(&name))
                     .locations(tool_locations(&input))
@@ -217,4 +223,22 @@ pub fn replay(
         }
     }
     Ok(())
+}
+
+/// A `todo_write` list as an ACP plan.
+fn plan(todos: &[alx_core::tools::todo::Todo]) -> Plan {
+    use alx_core::tools::todo::TodoStatus;
+    Plan::new(
+        todos
+            .iter()
+            .map(|t| {
+                let status = match t.status {
+                    TodoStatus::Pending => PlanEntryStatus::Pending,
+                    TodoStatus::InProgress => PlanEntryStatus::InProgress,
+                    TodoStatus::Completed => PlanEntryStatus::Completed,
+                };
+                PlanEntry::new(t.content.clone(), PlanEntryPriority::Medium, status)
+            })
+            .collect(),
+    )
 }
