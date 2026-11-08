@@ -69,7 +69,8 @@ impl Tool for ReadFileTool {
             name: "read_file".into(),
             description: "Read a UTF-8 text file. Returns up to `limit` lines (default 2000) \
                           starting at line `offset` (1-based, default 1), cut at 50000 bytes, \
-                          with a note on where to continue if there is more."
+                          with a note on where to continue if there is more. PNG, JPEG, GIF and \
+                          WebP files are returned as images."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -97,11 +98,65 @@ impl Tool for ReadFileTool {
             .get("limit")
             .and_then(Value::as_u64)
             .map_or(Self::DEFAULT_LIMIT, |l| l as usize);
+        if is_image_path(&path) {
+            return match ctx.executor.read_bytes(Path::new(&path)).await {
+                Ok(bytes) => image_output(&path, &bytes),
+                Err(e) => ToolOutput::error(format!("Could not read {path}: {e}")),
+            };
+        }
         match ctx.executor.read_file(Path::new(&path)).await {
             Ok(text) => ToolOutput::ok(window(&text, offset, limit, Self::MAX_OUTPUT_BYTES)),
             Err(e) => ToolOutput::error(format!("Could not read {path}: {e}")),
         }
     }
+}
+
+/// Largest image `read_file` returns. Anthropic caps base64 images at 5 MB.
+const MAX_IMAGE_BYTES: usize = 3_750_000;
+
+fn is_image_path(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    matches!(
+        ext.as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    )
+}
+
+/// The media type of an image, from its magic bytes.
+fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn image_output(path: &str, bytes: &[u8]) -> ToolOutput {
+    use base64::Engine;
+    let Some(media_type) = image_media_type(bytes) else {
+        return ToolOutput::error(format!("{path} is not a PNG, JPEG, GIF or WebP image"));
+    };
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return ToolOutput::error(format!(
+            "{path} is {} bytes; images over {MAX_IMAGE_BYTES} bytes are not supported",
+            bytes.len()
+        ));
+    }
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    ToolOutput::ok(format!(
+        "Read image {path} ({media_type}, {} bytes)",
+        bytes.len()
+    ))
+    .with_image(media_type, data)
 }
 
 /// Writes a whole text file, creating it if needed.
@@ -184,6 +239,30 @@ mod tests {
             .call(json!({"path": path_s, "offset": 2}), &ctx())
             .await;
         assert_eq!(out, ToolOutput::ok("two\n"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn reads_images_as_image_output() {
+        let dir = std::env::temp_dir().join(format!("alx-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let fake = dir.join("b.png");
+        std::fs::write(&fake, b"not an image").unwrap();
+
+        let out = ReadFileTool
+            .call(json!({"path": png.to_string_lossy()}), &ctx())
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            out.images,
+            vec![("image/png".to_owned(), "iVBORw0KGgpyZXN0".to_owned())]
+        );
+        let out = ReadFileTool
+            .call(json!({"path": fake.to_string_lossy()}), &ctx())
+            .await;
+        assert!(out.is_error && out.images.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

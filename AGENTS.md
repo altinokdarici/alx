@@ -95,6 +95,14 @@ history if you need it as a reference.
   are not run; each gets an error result telling the model to re-issue it with
   complete arguments, and the loop continues. Anthropic tolerates the cut-off
   JSON input in that case.
+- Images: `ContentBlock::Image{media_type, data}` (base64). A tool returns
+  them in `ToolOutput.images`; the agent puts them right after its
+  `ToolResult`, and an image there belongs to that result. `read_file` returns
+  PNG/JPEG/GIF/WebP (by extension, checked by magic bytes, max 3.75 MB) as an
+  image via `Executor::read_bytes`. Anthropic folds such images into the
+  `tool_result` content; Copilot sends them as `binaryResultsForLlm`, and user
+  images as `Attachment::Blob`. ACP prompt images (`prompt_capabilities.image`)
+  become user image blocks. Copilot's replay transcript drops images.
 - Tool output size: `BashTool` cuts stdout and stderr to 30000 bytes each
   (`MAX_OUTPUT_BYTES`), keeping the first quarter and last three quarters with a
   `[... N bytes truncated ...]` marker, because results are re-sent on every

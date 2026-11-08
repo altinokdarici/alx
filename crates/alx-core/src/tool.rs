@@ -16,6 +16,8 @@ pub struct ToolContext {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// Images attached to the result, as `(media_type, base64 data)`.
+    pub images: Vec<(String, String)>,
 }
 
 impl ToolOutput {
@@ -23,12 +25,18 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            images: Vec::new(),
         }
+    }
+    pub fn with_image(mut self, media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        self.images.push((media_type.into(), data.into()));
+        self
     }
     pub fn error(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             is_error: true,
+            images: Vec::new(),
         }
     }
 }

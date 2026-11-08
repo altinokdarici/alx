@@ -33,8 +33,9 @@ use github_copilot_sdk::session_events::{
     SessionCompactionCompleteData, SessionErrorData, SessionEventType, SessionUsageInfoData,
 };
 use github_copilot_sdk::{
-    CliProgram, Client, ClientMode, ClientOptions, EventSubscription, InfiniteSessionConfig,
-    RequestId, SessionConfig, SessionEvent, SystemMessageConfig, Tool, ToolSet,
+    Attachment, CliProgram, Client, ClientMode, ClientOptions, EventSubscription,
+    InfiniteSessionConfig, MessageOptions, RequestId, SessionConfig, SessionEvent,
+    SystemMessageConfig, Tool, ToolSet,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -206,7 +207,11 @@ impl CopilotProvider {
             .filter(|live| live.system == req.system && live.tools == req.tools)
             .map(|live| (live.seen.as_slice(), &live.pending));
         match plan(continuable, &req.messages) {
-            Step::Continue { results, text } => {
+            Step::Continue {
+                results,
+                text,
+                images,
+            } => {
                 let live = state.live.as_mut().expect("plan continues a live session");
                 for result in results {
                     let request_id = live
@@ -215,8 +220,22 @@ impl CopilotProvider {
                         .expect("plan checked the id is pending");
                     let (result, error) = if result.is_error {
                         (None, Some(result.content))
-                    } else {
+                    } else if result.images.is_empty() {
                         (Some(Value::String(result.content)), None)
+                    } else {
+                        let binary: Vec<Value> = result
+                            .images
+                            .into_iter()
+                            .map(|(mime, data)| {
+                                serde_json::json!({ "data": data, "mimeType": mime, "type": "image" })
+                            })
+                            .collect();
+                        let expanded = serde_json::json!({
+                            "textResultForLlm": result.content,
+                            "resultType": "success",
+                            "binaryResultsForLlm": binary,
+                        });
+                        (Some(expanded), None)
                     };
                     live.session
                         .rpc()
@@ -230,8 +249,16 @@ impl CopilotProvider {
                         .context("returning a tool result to Copilot")?;
                 }
                 if let Some(text) = text {
+                    let attachments = images
+                        .into_iter()
+                        .map(|(mime_type, data)| Attachment::Blob {
+                            data,
+                            mime_type,
+                            display_name: None,
+                        })
+                        .collect();
                     live.session
-                        .send(text)
+                        .send(MessageOptions::from(text).with_attachments(attachments))
                         .await
                         .context("sending to Copilot")?;
                 }
@@ -390,6 +417,8 @@ struct PendingResult {
     tool_use_id: String,
     content: String,
     is_error: bool,
+    /// `(media_type, base64 data)` images attached to the result.
+    images: Vec<(String, String)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -398,6 +427,8 @@ enum Step {
     Continue {
         results: Vec<PendingResult>,
         text: Option<String>,
+        /// `(media_type, base64 data)` images the user attached.
+        images: Vec<(String, String)>,
     },
     /// Start a new Copilot session with this first message.
     Fresh { prompt: String },
@@ -412,8 +443,10 @@ fn plan(live: Option<(&[Message], &HashMap<String, RequestId>)>, messages: &[Mes
         && prefix == seen
         && last.role == Role::User
     {
-        let mut results = Vec::new();
+        let mut results: Vec<PendingResult> = Vec::new();
         let mut text = Vec::new();
+        let mut images = Vec::new();
+        let mut after_result = false;
         for block in &last.content {
             match block {
                 ContentBlock::ToolResult {
@@ -424,19 +457,33 @@ fn plan(live: Option<(&[Message], &HashMap<String, RequestId>)>, messages: &[Mes
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),
                     is_error: *is_error,
+                    images: Vec::new(),
                 }),
+                ContentBlock::Image { media_type, data } => {
+                    let image = (media_type.clone(), data.clone());
+                    match results.last_mut() {
+                        Some(r) if after_result => r.images.push(image),
+                        _ => images.push(image),
+                    }
+                }
                 ContentBlock::Text { text: t } => text.push(t.as_str()),
                 ContentBlock::ToolUse { .. } => {}
             }
+            after_result = match block {
+                ContentBlock::ToolResult { .. } => true,
+                ContentBlock::Image { .. } => after_result,
+                _ => false,
+            };
         }
         // Copilot is blocked until every pending call gets a result, and it
         // can only take results for calls it is actually waiting on.
         let answers_pending = results.len() == pending.len()
             && results.iter().all(|r| pending.contains_key(&r.tool_use_id));
-        if answers_pending && (!results.is_empty() || !text.is_empty()) {
+        if answers_pending && (!results.is_empty() || !text.is_empty() || !images.is_empty()) {
             return Step::Continue {
                 results,
-                text: (!text.is_empty()).then(|| text.join("\n\n")),
+                text: (!text.is_empty() || !images.is_empty()).then(|| text.join("\n\n")),
+                images,
             };
         }
     }
@@ -476,6 +523,9 @@ fn replay(messages: &[Message]) -> String {
                 } => {
                     let kind = if *is_error { "error" } else { "result" };
                     out.push_str(&format!("Tool {kind} ({tool_use_id}): {content}\n\n"))
+                }
+                ContentBlock::Image { media_type, .. } => {
+                    out.push_str(&format!("{who}: [image {media_type}, not replayed]\n\n"))
                 }
             }
         }
@@ -769,7 +819,8 @@ mod tests {
             plan(Some((&seen, &pending(&[]))), &messages),
             Step::Continue {
                 results: vec![],
-                text: Some("again".into())
+                text: Some("again".into()),
+                images: vec![],
             }
         );
     }
@@ -780,15 +831,27 @@ mod tests {
         let mut messages = seen.to_vec();
         messages.push(Message {
             role: Role::User,
-            content: vec![tool_result("a", false), tool_result("b", true)],
+            content: vec![
+                tool_result("a", false),
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+                tool_result("b", true),
+            ],
         });
-        let Step::Continue { results, text } =
-            plan(Some((&seen, &pending(&["a", "b"]))), &messages)
+        let Step::Continue {
+            results,
+            text,
+            images,
+        } = plan(Some((&seen, &pending(&["a", "b"]))), &messages)
         else {
             panic!("expected continue");
         };
         assert_eq!(text, None);
+        assert!(images.is_empty());
         assert_eq!(results.len(), 2);
+        assert_eq!(results[0].images, [("image/png".into(), "AAAA".into())]);
         assert!(results[1].is_error);
     }
 

@@ -239,7 +239,7 @@ impl SingleAgent {
                 match block {
                     ContentBlock::Text { text } => events.emit(Event::AssistantText { text }),
                     ContentBlock::ToolUse { id, name, input } => tool_calls.push((id, name, input)),
-                    ContentBlock::ToolResult { .. } => {}
+                    ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => {}
                 }
             }
 
@@ -392,10 +392,17 @@ impl SingleAgent {
             cancelled |= cancel.is_cancelled();
             let mut results: Vec<ContentBlock> = outputs
                 .into_iter()
-                .map(|(id, out)| ContentBlock::ToolResult {
-                    tool_use_id: id,
-                    content: out.content,
-                    is_error: out.is_error,
+                .flat_map(|(id, out)| {
+                    let images = out
+                        .images
+                        .into_iter()
+                        .map(|(media_type, data)| ContentBlock::Image { media_type, data });
+                    std::iter::once(ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content: out.content,
+                        is_error: out.is_error,
+                    })
+                    .chain(images)
                 })
                 .collect();
             if !cancelled {

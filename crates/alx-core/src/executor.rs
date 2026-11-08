@@ -43,6 +43,12 @@ pub trait Executor: Send + Sync {
         tokio::fs::read_to_string(path).await
     }
 
+    /// Read a file's raw bytes (e.g. an image). The default reads the host's
+    /// file system.
+    async fn read_bytes(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        tokio::fs::read(path).await
+    }
+
     /// Write a text file, creating it and its parent directories if needed.
     /// The default writes to the host's file system.
     async fn write_file(&self, path: &Path, content: &str) -> std::io::Result<()> {

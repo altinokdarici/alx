@@ -32,6 +32,12 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    /// A base64-encoded image. In a user message, an image right after a
+    /// `ToolResult` belongs to that result.
+    Image {
+        media_type: String,
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

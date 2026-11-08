@@ -198,6 +198,10 @@ impl Executor for ClientExecutor {
         Ok(resp.content)
     }
 
+    async fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        LocalExecutor.read_bytes(&self.resolve(path)).await
+    }
+
     async fn write_file(&self, path: &Path, content: &str) -> io::Result<()> {
         let path = self.resolve(path);
         if !self.caps.fs.write_text_file {

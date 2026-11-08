@@ -41,12 +41,12 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
     CancelNotification, ClientCapabilities, CompactionStatus, CompactionUpdate, ContentBlock,
     Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
-    LoadSessionResponse, Meta, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
-    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    UnstructuredCommandInput, Usage as AcpUsage,
+    LoadSessionResponse, Meta, NewSessionRequest, NewSessionResponse, PromptCapabilities,
+    PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionId, SessionListCapabilities, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, UnstructuredCommandInput, Usage as AcpUsage,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use alx_core::protocol::{Compaction, Event, Message, Usage};
@@ -194,6 +194,21 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
+/// The prompt as a user message: its text, then any images.
+fn prompt_message(text: String, blocks: &[ContentBlock]) -> Message {
+    let mut message = Message::user_text(text);
+    message
+        .content
+        .extend(blocks.iter().filter_map(|b| match b {
+            ContentBlock::Image(i) => Some(alx_core::protocol::ContentBlock::Image {
+                media_type: i.mime_type.clone(),
+                data: i.data.clone(),
+            }),
+            _ => None,
+        }));
+    message
+}
+
 /// The slash commands alx handles itself instead of sending to the model.
 fn commands_update() -> SessionUpdate {
     SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
@@ -292,6 +307,7 @@ pub async fn serve(
                             .agent_capabilities(
                                 AgentCapabilities::new()
                                     .load_session(true)
+                                    .prompt_capabilities(PromptCapabilities::new().image(true))
                                     .session_capabilities(
                                         SessionCapabilities::new()
                                             .list(SessionListCapabilities::new())
@@ -441,7 +457,9 @@ pub async fn serve(
                             Ok(session) => session,
                             Err(_) if compact_command(&text).is_some() => live.session.lock().await,
                             Err(_) => {
-                                let id = live.steering.push(Message::user_text(text.clone()));
+                                let id = live
+                                    .steering
+                                    .push(prompt_message(text.clone(), &req.prompt));
                                 let session = live.session.lock().await;
                                 if live.steering.take(id).is_none() {
                                     return responder
@@ -486,7 +504,7 @@ pub async fn serve(
                         let result = agent
                             .run_turn_with(
                                 &mut session,
-                                Message::user_text(text),
+                                prompt_message(text, &req.prompt),
                                 &sink,
                                 &cancel,
                                 &options,

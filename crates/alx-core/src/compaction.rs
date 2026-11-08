@@ -20,6 +20,8 @@ pub fn estimate_tokens(m: &Message) -> u64 {
             ContentBlock::Text { text } => text.len(),
             ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
             ContentBlock::ToolResult { content, .. } => content.len(),
+            // Roughly what a typical image costs (~1600 tokens).
+            ContentBlock::Image { .. } => 6_400,
         })
         .sum();
     (chars as u64).div_ceil(4)
@@ -85,6 +87,7 @@ pub fn summary_request(messages: &[Message], instructions: Option<&str>) -> Mess
                     };
                     format!("[{kind}]: {content}")
                 }
+                (_, ContentBlock::Image { .. }) => "[Image]".to_owned(),
             };
             transcript.push_str(&line);
             transcript.push_str("\n\n");

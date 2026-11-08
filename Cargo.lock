@@ -96,6 +96,7 @@ dependencies = [
  "alx-protocol",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "cargo-husky",
  "futures",
  "github-copilot-sdk",

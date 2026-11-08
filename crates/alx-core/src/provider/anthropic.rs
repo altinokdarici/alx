@@ -90,26 +90,47 @@ fn message_to_wire(m: &Message) -> Value {
         Role::User => "user",
         Role::Assistant => "assistant",
     };
-    let content: Vec<Value> = m
-        .content
-        .iter()
-        .map(|b| match b {
+    let mut content: Vec<Value> = Vec::new();
+    // Index of the last block if it is a tool_result, so images that follow
+    // it go inside it (tool_result blocks must come first in the message).
+    let mut open_result: Option<usize> = None;
+    for b in &m.content {
+        let block = match b {
             ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
             ContentBlock::ToolUse { id, name, input } => {
                 json!({ "type": "tool_use", "id": id, "name": name, "input": input })
             }
             ContentBlock::ToolResult {
                 tool_use_id,
-                content,
+                content: text,
                 is_error,
-            } => json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": content,
-                "is_error": is_error,
-            }),
-        })
-        .collect();
+            } => {
+                content.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": [{ "type": "text", "text": text }],
+                    "is_error": is_error,
+                }));
+                open_result = Some(content.len() - 1);
+                continue;
+            }
+            ContentBlock::Image { media_type, data } => {
+                let image = json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                });
+                if let Some(i) = open_result
+                    && let Some(inner) = content[i]["content"].as_array_mut()
+                {
+                    inner.push(image);
+                    continue;
+                }
+                image
+            }
+        };
+        open_result = None;
+        content.push(block);
+    }
     json!({ "role": role, "content": content })
 }
 
@@ -445,6 +466,36 @@ impl Provider for AnthropicProvider {
 mod tests {
     use super::*;
     use alx_protocol::ToolSpec;
+
+    #[test]
+    fn images_after_a_tool_result_go_inside_it() {
+        let image = || ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        let wire = message_to_wire(&Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "read".into(),
+                    is_error: false,
+                },
+                image(),
+                ContentBlock::Text {
+                    text: "look".into(),
+                },
+                image(),
+            ],
+        });
+        let content = wire["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["content"][1]["type"], "image");
+        assert_eq!(content[0]["content"][1]["source"]["data"], "AAAA");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "image");
+    }
 
     #[test]
     fn builds_request_body() {
