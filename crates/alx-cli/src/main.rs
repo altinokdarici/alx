@@ -10,6 +10,7 @@ mod commands;
 mod markdown;
 mod picker;
 mod render;
+mod steer;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -576,12 +577,32 @@ impl Repl {
             // Ctrl-C cancels the running turn; a second one gives up waiting
             // for it to wind down and exits.
             let mut cancelled = false;
+            // Lines typed during the turn steer it.
+            let stop_steering = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (steer_tx, mut steer_rx) = tokio::sync::mpsc::unbounded_channel();
+            let steer_reader = steer::is_terminal().then(|| {
+                let stop = stop_steering.clone();
+                tokio::task::spawn_blocking(move || steer::read_lines(&stop, &steer_tx))
+            });
+            let mut steered = Vec::new();
             let result = {
                 let turn = prompt(&session, input);
                 tokio::pin!(turn);
                 loop {
                     tokio::select! {
                         result = &mut turn => break result,
+                        Some(line) = steer_rx.recv() => {
+                            let line: String = line;
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            if let Some(rl) = editor.as_mut() {
+                                let _ = rl.add_history_entry(line);
+                            }
+                            println!("{}", style.dim(&format!("↪ steering: {line}")));
+                            steered.push(Box::pin(prompt(&session, line)));
+                        }
                         _ = tokio::signal::ctrl_c() => {
                             if cancelled {
                                 println!();
@@ -594,6 +615,21 @@ impl Repl {
                     }
                 }
             };
+            stop_steering.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(reader) = steer_reader {
+                let _ = reader.await;
+            }
+            // A steering message the turn didn't take runs as a turn of its
+            // own; wait for those too.
+            for turn in steered {
+                match turn.await {
+                    Ok(reply) if reply.usage.is_some() => {
+                        self.renderer.emit(client::turn_finished(&reply))
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("{}", render::error_line(style, &e.to_string())),
+                }
+            }
             let reply = match result {
                 Ok(reply) => reply,
                 Err(e) => {

@@ -78,8 +78,10 @@ history if you need it as a reference.
   message, and when the model would end the turn (`EndTurn`) it continues with
   them instead. Over ACP, a `session/prompt` that arrives while a turn runs is
   queued that way and answered (`end_turn`) when the turn ends; if the turn
-  ended without taking it, it runs as its own turn. The CLI can't type during
-  a turn yet, so it doesn't steer.
+  ended without taking it, it runs as its own turn. The CLI steers on a TTY
+  (Unix): during a turn `steer.rs` polls fd 0 (raw `libc::read`, so rustyline
+  loses no buffered input) and each line typed is sent as a prompt. Piped
+  stdin doesn't steer. Typed echo may interleave with streamed output.
 - Tool calls in one model response run concurrently: approvals are asked in
   order first, then the approved calls run together (`join_all`) and the
   results go back in call order. If any call's tool returns

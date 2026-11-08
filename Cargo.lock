@@ -82,6 +82,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "libc",
  "pulldown-cmark",
  "rustyline",
  "serde_json",
