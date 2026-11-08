@@ -167,8 +167,6 @@ struct State {
     answer_started: bool,
     /// The latest context window fill level, shown when the turn finishes.
     context: Option<alx_core::protocol::ContextUsage>,
-    /// What the session's turns cost so far, at API prices.
-    total_cost: f64,
 }
 
 /// Turns events into terminal text.
@@ -300,14 +298,7 @@ impl Renderer {
                     lines.push(format!("model: {model}"));
                 }
                 if let Some(usage) = usage {
-                    let mut line = usage_line(usage);
-                    let price = st.last_model.as_deref().and_then(alx_core::pricing::price);
-                    if let Some(price) = price {
-                        let cost = price.cost(usage);
-                        st.total_cost += cost;
-                        line.push_str(&format!(" · ${cost:.4} (session ${:.4})", st.total_cost));
-                    }
-                    lines.push(line);
+                    lines.push(usage_line(usage));
                 }
                 if let Some(c) = st.context.take() {
                     lines.push(context_line(&c));
@@ -614,31 +605,6 @@ mod tests {
     fn color_adds_ansi_only_when_enabled() {
         assert!(Style { color: true }.red("x").contains("\x1b[31m"));
         assert_eq!(PLAIN.red("x"), "x");
-    }
-
-    #[test]
-    fn cost_is_shown_for_priced_models_and_summed() {
-        let r = Renderer::new(PLAIN, false);
-        let done = || Event::TurnFinished {
-            stop_reason: alx_core::protocol::StopReason::EndTurn,
-            model: Some("claude-haiku-4-5".into()),
-            usage: Some(alx_core::protocol::Usage {
-                input_tokens: 1000,
-                output_tokens: 100,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-            }),
-        };
-        assert!(
-            r.handle(&done())
-                .unwrap()
-                .contains("$0.0015 (session $0.0015)")
-        );
-        assert!(
-            r.handle(&done())
-                .unwrap()
-                .contains("$0.0015 (session $0.0030)")
-        );
     }
 
     #[test]
