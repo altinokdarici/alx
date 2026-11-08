@@ -254,6 +254,19 @@ impl Renderer {
                 None
             }
             Event::Compacted(c) => Some(format!("{}\n", style.dim(&compaction_line(c)))),
+            Event::Retrying {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error,
+            } => {
+                let error = error.lines().next().unwrap_or_default();
+                let line = format!(
+                    "retrying in {:.0}s ({attempt}/{max_attempts}): {error}",
+                    *delay_ms as f64 / 1000.0
+                );
+                Some(format!("{}\n", style.dim(&line)))
+            }
             Event::TurnFinished {
                 model,
                 usage,

@@ -70,6 +70,16 @@ history if you need it as a reference.
   normalized path) so calls on the same file run one after another. Cancelling
   cancels every running call. Clients must match `ToolCallFinished` to its
   `ToolCallStarted` by id, since starts and finishes interleave.
+- Retries: a provider returns `TransientError` (overload, 408/409/429/5xx,
+  send failures; not quota/billing, not `x-should-retry: false`) only before
+  any of the response is reported. `SingleAgent` retries it up to
+  `AgentConfig::max_retries` (4) times, waiting `retry-after` or 2s, 4s, 8s...
+  (cap 60s; a longer server wait fails), and emits `Event::Retrying`. Over ACP
+  that is a thought chunk with `_meta["alx/retrying"]`; the CLI prints it.
+- Truncated responses: tool calls in a response that stopped on `max_tokens`
+  are not run; each gets an error result telling the model to re-issue it with
+  complete arguments, and the loop continues. Anthropic tolerates the cut-off
+  JSON input in that case.
 - Tool output size: `BashTool` cuts stdout and stderr to 30000 bytes each
   (`MAX_OUTPUT_BYTES`), keeping the first quarter and last three quarters with a
   `[... N bytes truncated ...]` marker, because results are re-sent on every

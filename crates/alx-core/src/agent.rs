@@ -2,7 +2,7 @@
 
 use crate::event::EventSink;
 use crate::executor::Executor;
-use crate::provider::{CompletionRequest, Provider};
+use crate::provider::{CompletionRequest, CompletionResponse, Provider, TransientError};
 use crate::session::Session;
 use crate::tool::{Approval, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
 use alx_protocol::{
@@ -10,6 +10,7 @@ use alx_protocol::{
 };
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[async_trait]
@@ -87,6 +88,9 @@ pub struct TurnOptions {
 pub struct AgentConfig {
     pub system_prompt: String,
     pub max_tokens: u32,
+    /// Retries of a model request that failed with a
+    /// [`TransientError`](crate::provider::TransientError).
+    pub max_retries: u32,
 }
 
 impl Default for AgentConfig {
@@ -96,6 +100,7 @@ impl Default for AgentConfig {
                             write files, execute code"
                 .into(),
             max_tokens: 10240,
+            max_retries: 4,
         }
     }
 }
@@ -125,21 +130,8 @@ impl SingleAgent {
             None => self.tool_ctx.clone(),
         };
         loop {
-            events.emit(Event::ModelRequest);
-            let on_text = |text: &str| events.emit(Event::AssistantTextDelta { text: text.into() });
-            let request = self.provider.complete_streaming(
-                CompletionRequest {
-                    system: self.config.system_prompt.clone(),
-                    messages: session.messages.clone(),
-                    tools: self.tools.specs(),
-                    max_tokens: self.config.max_tokens,
-                },
-                &on_text,
-            );
-            let resp = tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Ok(mark_cancelled(session)),
-                resp = request => resp?,
+            let Some(resp) = self.request_with_retry(session, events, cancel).await? else {
+                return Ok(mark_cancelled(session));
             };
             if resp.model.is_some() {
                 model.clone_from(&resp.model);
@@ -168,6 +160,36 @@ impl SingleAgent {
                 events.emit(Event::ContextUsage(c));
             }
 
+            if resp.stop_reason == StopReason::MaxTokens && !tool_calls.is_empty() {
+                // The calls were cut off, so their arguments may be incomplete.
+                // Don't run them; tell the model and let it try again.
+                let results = tool_calls
+                    .into_iter()
+                    .map(|(id, name, input)| {
+                        events.emit(Event::ToolCallStarted {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input,
+                        });
+                        events.emit(Event::ToolCallFinished {
+                            id: id.clone(),
+                            name,
+                            output: TRUNCATED_CALL.into(),
+                            is_error: true,
+                        });
+                        ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            content: TRUNCATED_CALL.into(),
+                            is_error: true,
+                        }
+                    })
+                    .collect();
+                session.messages.push(Message {
+                    role: Role::User,
+                    content: results,
+                });
+                continue;
+            }
             if resp.stop_reason != StopReason::ToolUse || tool_calls.is_empty() {
                 return Ok(resp.stop_reason);
             }
@@ -279,6 +301,70 @@ impl SingleAgent {
             });
             if cancelled {
                 return Ok(mark_cancelled(session));
+            }
+        }
+    }
+}
+
+const TRUNCATED_CALL: &str = "Not executed: your response hit the output token limit, so \
+     this tool call was cut off and its arguments may be incomplete. Re-issue it with complete \
+     arguments; split large content into several smaller calls.";
+
+/// The backoff before retry `attempt` (1-based): 2s, 4s, 8s, ... capped at 60s.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs(2u64.saturating_pow(attempt).min(60))
+}
+
+/// Server-requested waits longer than this aren't worth sitting through.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+impl SingleAgent {
+    /// One model request, retried on transient errors. `None` if cancelled.
+    async fn request_with_retry(
+        &self,
+        session: &Session,
+        events: &dyn EventSink,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Option<CompletionResponse>> {
+        let on_text = |text: &str| events.emit(Event::AssistantTextDelta { text: text.into() });
+        let mut attempt = 0;
+        loop {
+            events.emit(Event::ModelRequest);
+            let request = self.provider.complete_streaming(
+                CompletionRequest {
+                    system: self.config.system_prompt.clone(),
+                    messages: session.messages.clone(),
+                    tools: self.tools.specs(),
+                    max_tokens: self.config.max_tokens,
+                },
+                &on_text,
+            );
+            let err = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(None),
+                resp = request => match resp {
+                    Ok(resp) => return Ok(Some(resp)),
+                    Err(e) => e,
+                },
+            };
+            let Some(transient) = err.downcast_ref::<TransientError>() else {
+                return Err(err);
+            };
+            attempt += 1;
+            let delay = transient.retry_after.unwrap_or_else(|| backoff(attempt));
+            if attempt > self.config.max_retries || delay > MAX_RETRY_DELAY {
+                return Err(err);
+            }
+            events.emit(Event::Retrying {
+                attempt,
+                max_attempts: self.config.max_retries,
+                delay_ms: delay.as_millis() as u64,
+                error: transient.message.clone(),
+            });
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(None),
+                () = tokio::time::sleep(delay) => {}
             }
         }
     }
@@ -584,6 +670,125 @@ mod tests {
 
         assert!(res.is_err());
         assert_eq!(session.messages, vec![Message::user_text("earlier")]);
+    }
+
+    fn transient() -> anyhow::Error {
+        anyhow::Error::new(TransientError {
+            message: "overloaded".into(),
+            retry_after: Some(Duration::from_millis(1)),
+        })
+    }
+
+    fn end_turn(t: &str) -> anyhow::Result<CompletionResponse> {
+        Ok(CompletionResponse {
+            content: vec![text(t)],
+            stop_reason: StopReason::EndTurn,
+            model: None,
+            usage: None,
+            context: None,
+            compactions: vec![],
+        })
+    }
+
+    #[tokio::test]
+    async fn transient_errors_are_retried() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Err(transient()),
+            Err(transient()),
+            end_turn("ok"),
+        ]));
+        let agent = agent(provider, Arc::new(FakeExecutor::default()));
+        let sink = VecSink::default();
+        let mut session = Session::new("s");
+        let stop = agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &sink,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stop, StopReason::EndTurn);
+        let retries: Vec<u32> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Retrying { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retries, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn retries_give_up_after_max_retries() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Err(transient()),
+            Err(transient()),
+        ]));
+        let mut agent = agent(provider, Arc::new(FakeExecutor::default()));
+        agent.config.max_retries = 1;
+        let res = agent
+            .run_turn(
+                &mut Session::new("s"),
+                Message::user_text("hi"),
+                &crate::event::NullSink,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(res.unwrap_err().downcast_ref::<TransientError>().is_some());
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_a_minute() {
+        assert_eq!(backoff(1), Duration::from_secs(2));
+        assert_eq!(backoff(3), Duration::from_secs(8));
+        assert_eq!(backoff(10), Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn tool_calls_cut_off_by_max_tokens_are_not_run() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: json!({"input": "echo hi"}),
+                }],
+                stop_reason: StopReason::MaxTokens,
+                model: None,
+                usage: None,
+                context: None,
+                compactions: vec![],
+            }),
+            end_turn("done"),
+        ]));
+        let exec = Arc::new(FakeExecutor::default());
+        let agent = agent(provider.clone(), exec.clone());
+        let mut session = Session::new("s");
+        let stop = agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &crate::event::NullSink,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stop, StopReason::EndTurn);
+        assert!(exec.ran.lock().unwrap().is_empty());
+        assert_eq!(
+            session.messages[2].content,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: TRUNCATED_CALL.into(),
+                is_error: true,
+            }]
+        );
+        assert_eq!(provider.seen.lock().unwrap().len(), 2);
     }
 
     /// Never finishes, so a turn can only end by being cancelled.

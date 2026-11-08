@@ -31,7 +31,7 @@ pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};
 pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
 #[cfg(feature = "copilot")]
 pub use provider::copilot::{CopilotConfig, CopilotProvider};
-pub use provider::{CompletionRequest, CompletionResponse, Provider};
+pub use provider::{CompletionRequest, CompletionResponse, Provider, TransientError};
 pub use session::{
     FileSessionStore, InMemorySessionStore, Session, SessionStore, SessionSummary,
     default_session_dir,

@@ -106,6 +106,31 @@ pub fn compaction_update(id: String, c: &Compaction) -> SessionUpdate {
     )
 }
 
+/// A retry notice, as a thought chunk (ACP has nothing closer). The numbers
+/// go in `_meta` under `alx/retrying`, so alx's own client can read them back.
+pub fn retrying_update(
+    attempt: u32,
+    max_attempts: u32,
+    delay_ms: u64,
+    error: &str,
+) -> SessionUpdate {
+    let mut meta = Meta::new();
+    meta.insert(
+        "alx/retrying".into(),
+        serde_json::json!({
+            "attempt": attempt,
+            "maxAttempts": max_attempts,
+            "delayMs": delay_ms,
+            "error": error,
+        }),
+    );
+    let text = format!(
+        "Retrying in {:.0}s (attempt {attempt}/{max_attempts}): {error}",
+        delay_ms as f64 / 1000.0
+    );
+    SessionUpdate::AgentThoughtChunk(chunk(&text).meta(meta))
+}
+
 impl EventSink for AcpSink {
     fn emit(&self, event: Event) {
         match event {
@@ -147,6 +172,12 @@ impl EventSink for AcpSink {
                     id, fields,
                 )));
             }
+            Event::Retrying {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error,
+            } => self.send(retrying_update(attempt, max_attempts, delay_ms, &error)),
             Event::ContextUsage(u) => {
                 self.send(SessionUpdate::UsageUpdate(UsageUpdate::new(
                     u.used_tokens,

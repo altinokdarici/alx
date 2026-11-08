@@ -10,6 +10,26 @@ use alx_protocol::{
     Usage,
 };
 use async_trait::async_trait;
+use std::time::Duration;
+
+/// A provider error worth retrying: overload, rate limit, a 5xx, a dropped
+/// connection. The agent loop retries these with backoff; any other error
+/// ends the turn. Return it (as the `anyhow` error) only when nothing of the
+/// response has been reported yet, since a retry starts the response over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientError {
+    pub message: String,
+    /// How long the server asked us to wait, if it said.
+    pub retry_after: Option<Duration>,
+}
+
+impl std::fmt::Display for TransientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TransientError {}
 
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {

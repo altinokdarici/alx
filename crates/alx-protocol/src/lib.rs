@@ -208,6 +208,14 @@ pub enum Event {
         output: String,
         is_error: bool,
     },
+    /// A model request failed with a transient error (overload, rate limit,
+    /// network) and will be retried after `delay_ms`.
+    Retrying {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error: String,
+    },
     /// The context window fill level, after a model response.
     ContextUsage(ContextUsage),
     /// The provider compacted the conversation (automatically or on request).

@@ -1,12 +1,13 @@
 //! Anthropic Messages API, streamed (server-sent events) and reassembled
 //! into one response; the agent loop still sees a single `complete` result.
 
-use super::{CompletionRequest, CompletionResponse, Provider};
-use alx_protocol::{ContentBlock, Message, ModelInfo, ProviderInfo, Role, Usage};
+use super::{CompletionRequest, CompletionResponse, Provider, TransientError};
+use alx_protocol::{ContentBlock, Message, ModelInfo, ProviderInfo, Role, StopReason, Usage};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
@@ -252,7 +253,7 @@ impl StreamAccumulator {
     }
 
     fn finish(self) -> anyhow::Result<CompletionResponse> {
-        let stop_reason = self
+        let stop_reason: StopReason = self
             .stop_reason
             .context("LLM stream ended before the message finished")?
             .into();
@@ -261,8 +262,12 @@ impl StreamAccumulator {
             match partial {
                 Partial::Text(text) => content.push(ContentBlock::Text { text }),
                 Partial::ToolUse { id, name, json } => {
+                    // A response cut off by max_tokens can end mid-JSON; the
+                    // agent loop doesn't run its tool calls anyway.
                     let input = if json.trim().is_empty() {
                         json!({})
+                    } else if stop_reason == StopReason::MaxTokens {
+                        serde_json::from_str(&json).unwrap_or_else(|_| json!({}))
                     } else {
                         serde_json::from_str(&json)
                             .with_context(|| format!("tool_use `{name}` had invalid JSON input"))?
@@ -280,6 +285,58 @@ impl StreamAccumulator {
             model: self.model,
             usage: self.usage,
         })
+    }
+}
+
+/// What the response headers say about retrying: `Some(false)` from
+/// `x-should-retry: false`, otherwise whether to retry is up to the status;
+/// the delay from `retry-after-ms` or `retry-after` (seconds).
+struct RetryHint {
+    should_retry: Option<bool>,
+    after: Option<Duration>,
+}
+
+fn retry_hint(headers: &reqwest::header::HeaderMap) -> RetryHint {
+    let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+    let after = get("retry-after-ms")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|ms| Duration::from_secs_f64(ms.max(0.0) / 1000.0))
+        .or_else(|| {
+            get("retry-after")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .map(|s| Duration::from_secs_f64(s.max(0.0)))
+        });
+    let should_retry = get("x-should-retry").and_then(|v| match v.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    });
+    RetryHint {
+        should_retry,
+        after,
+    }
+}
+
+/// The error for a failed `/v1/messages` request: transient for timeouts,
+/// conflicts, rate limits, overload and server errors, unless the server says
+/// not to retry or the body is about quota or billing (retrying won't help).
+fn request_error(status: u16, hint: RetryHint, body: &str) -> anyhow::Error {
+    let message = format!("LLM request failed ({status}): {body}");
+    let lower = body.to_ascii_lowercase();
+    let hopeless = ["quota", "billing", "credit balance"]
+        .iter()
+        .any(|w| lower.contains(w));
+    let retryable = match hint.should_retry {
+        Some(r) => r,
+        None => matches!(status, 408 | 409 | 429 | 500..=599) && !hopeless,
+    };
+    if retryable {
+        anyhow::Error::new(TransientError {
+            message,
+            retry_after: hint.after,
+        })
+    } else {
+        anyhow::anyhow!(message)
     }
 }
 
@@ -348,11 +405,17 @@ impl Provider for AnthropicProvider {
             .json(&self.body(&req))
             .send()
             .await
-            .context("LLM request failed to send")?;
+            .map_err(|e| {
+                anyhow::Error::new(TransientError {
+                    message: format!("LLM request failed to send: {e}"),
+                    retry_after: None,
+                })
+            })?;
         let status = resp.status();
         if !status.is_success() {
+            let retry = retry_hint(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            bail!("LLM request failed ({status}): {body}");
+            return Err(request_error(status.as_u16(), retry, &body));
         }
         // Dropping this future drops the connection, which stops the
         // response mid-stream (that is how cancellation works).
@@ -376,7 +439,7 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alx_protocol::{StopReason, ToolSpec};
+    use alx_protocol::ToolSpec;
 
     #[test]
     fn builds_request_body() {
@@ -526,5 +589,25 @@ mod tests {
         let mut p = SseParser::default();
         let evs = p.push(b": comment\r\nevent: x\r\ndata: {\"a\":1}\r\n\r\ndata: 2\n\n");
         assert_eq!(evs, vec!["{\"a\":1}".to_owned(), "2".to_owned()]);
+    }
+
+    #[test]
+    fn which_request_errors_are_transient() {
+        let hint = |should_retry, after| RetryHint {
+            should_retry,
+            after,
+        };
+        let transient = |e: anyhow::Error| e.downcast_ref::<TransientError>().cloned();
+        let e = transient(request_error(
+            529,
+            hint(None, Some(Duration::from_secs(3))),
+            "overloaded",
+        ));
+        assert_eq!(e.unwrap().retry_after, Some(Duration::from_secs(3)));
+        assert!(transient(request_error(429, hint(None, None), "rate limited")).is_some());
+        assert!(transient(request_error(400, hint(None, None), "bad request")).is_none());
+        assert!(transient(request_error(429, hint(None, None), "quota exceeded")).is_none());
+        assert!(transient(request_error(503, hint(Some(false), None), "")).is_none());
+        assert!(transient(request_error(400, hint(Some(true), None), "")).is_some());
     }
 }

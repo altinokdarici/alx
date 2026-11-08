@@ -3,7 +3,7 @@
 //! draws.
 
 use agent_client_protocol::schema::v1::{
-    CompactionStatus, CompactionUpdate, ContentBlock, PromptResponse, SessionUpdate,
+    CompactionStatus, CompactionUpdate, ContentBlock, ContentChunk, PromptResponse, SessionUpdate,
     StopReason as AcpStop, ToolCallContent, ToolCallStatus,
 };
 use alx_core::protocol::{Compaction, ContextUsage, Event, StopReason, Usage};
@@ -82,6 +82,7 @@ impl Translator {
                     Event::ModelRequest,
                 ]
             }
+            SessionUpdate::AgentThoughtChunk(c) => retrying(&c).into_iter().collect(),
             SessionUpdate::UsageUpdate(u) => vec![Event::ContextUsage(ContextUsage {
                 used_tokens: u.used,
                 limit_tokens: u.size,
@@ -93,6 +94,18 @@ impl Translator {
             _ => vec![],
         }
     }
+}
+
+/// A retry notice sent by alx's server (see `alx_acp::events::retrying_update`).
+fn retrying(c: &ContentChunk) -> Option<Event> {
+    let v = serde_json::to_value(&c.meta).ok()?;
+    let r = v.get("alx/retrying")?;
+    Some(Event::Retrying {
+        attempt: r.get("attempt")?.as_u64()? as u32,
+        max_attempts: r.get("maxAttempts")?.as_u64()? as u32,
+        delay_ms: r.get("delayMs")?.as_u64()?,
+        error: r.get("error")?.as_str()?.to_owned(),
+    })
 }
 
 /// A finished compaction with its counts (sent by the server in `_meta`).
