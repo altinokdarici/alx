@@ -33,6 +33,17 @@ pub struct Session {
     /// The model picked for this session. `None` means the provider's
     /// default (or the configured one).
     pub model: Option<String>,
+    /// The latest compaction, if any. `messages` keeps the whole history;
+    /// requests send the summary and `messages[first_kept..]`.
+    pub compaction: Option<CompactionState>,
+}
+
+/// Where the conversation was cut and what came before, summarized.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionState {
+    /// Index into [`Session::messages`] of the first message still sent.
+    pub first_kept: usize,
+    pub summary: String,
 }
 
 impl Session {
@@ -46,7 +57,31 @@ impl Session {
             cwd: None,
             provider: None,
             model: None,
+            compaction: None,
         }
+    }
+
+    /// The messages to send to the model: everything, or after a compaction
+    /// the summary followed by the messages kept.
+    pub fn request_messages(&self) -> Vec<Message> {
+        let Some(c) = &self.compaction else {
+            return self.messages.clone();
+        };
+        let summary = ContentBlock::Text {
+            text: crate::compaction::summary_message(&c.summary),
+        };
+        let mut kept = self.messages[c.first_kept.min(self.messages.len())..].to_vec();
+        match kept.first_mut() {
+            Some(first) if first.role == Role::User => first.content.insert(0, summary),
+            _ => kept.insert(
+                0,
+                Message {
+                    role: Role::User,
+                    content: vec![summary],
+                },
+            ),
+        }
+        kept
     }
 
     /// A fresh, sortable, unique-enough session id.
@@ -156,6 +191,8 @@ struct Header {
     provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compaction: Option<CompactionState>,
 }
 
 /// One JSONL file per session in a directory: a header line, then one
@@ -199,6 +236,7 @@ fn parse(text: &str) -> anyhow::Result<Session> {
         cwd: header.cwd,
         provider: header.provider,
         model: header.model,
+        compaction: header.compaction,
     })
 }
 
@@ -210,6 +248,7 @@ fn render(session: &Session, updated_at: u64) -> anyhow::Result<String> {
         cwd: session.cwd.clone(),
         provider: session.provider.clone(),
         model: session.model.clone(),
+        compaction: session.compaction.clone(),
     })?;
     out.push('\n');
     for m in &session.messages {

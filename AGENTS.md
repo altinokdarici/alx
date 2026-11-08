@@ -58,10 +58,18 @@ history if you need it as a reference.
   95%). The provider reports it: `CompletionResponse::{context, compactions}`
   become `Event::ContextUsage` / `Event::Compacted`, and the CLI prints a
   `context: used / limit (%)` line each turn. `/compact` calls
-  `AgentLoop::compact` -> `Provider::compact` (Copilot: `history.compact` RPC;
-  other providers error). alx's own message list is never compacted, so a
-  resumed or replayed session sends the full transcript to a fresh Copilot
-  session. Anthropic has no compaction yet (its server-side one is beta).
+  `AgentLoop::compact` -> `Provider::compact` (Copilot: `history.compact` RPC,
+  for a provider that `compacts_itself`). Other providers get alx's own
+  compaction (`compaction.rs`, pi's numbers): when the context passes
+  `context_window()` minus 16,384 tokens (checked before each request; Anthropic
+  says 200k), or on `/compact [instructions]`, the messages before a cut that
+  keeps about 20,000 recent tokens (a user message, else an assistant one, never
+  tool results) are summarized by the model. `Session::compaction` stores the
+  cut and summary (in the session file header); `messages` keeps everything,
+  and `Session::request_messages()` is the summary plus the kept messages. A
+  later compaction folds the previous summary in. Under 2,000 tokens to remove
+  does nothing. The agent also emits `ContextUsage` from `Usage` for these
+  providers.
 - Tool calls in one model response run concurrently: approvals are asked in
   order first, then the approved calls run together (`join_all`) and the
   results go back in call order. If any call's tool returns

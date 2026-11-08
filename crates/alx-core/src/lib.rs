@@ -15,6 +15,7 @@
 //! any UI can be plugged in on top.
 
 pub mod agent;
+pub mod compaction;
 pub mod context;
 pub mod env;
 pub mod event;
@@ -34,7 +35,7 @@ pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
 pub use provider::copilot::{CopilotConfig, CopilotProvider};
 pub use provider::{CompletionRequest, CompletionResponse, Provider, TransientError};
 pub use session::{
-    FileSessionStore, InMemorySessionStore, Session, SessionStore, SessionSummary,
+    CompactionState, FileSessionStore, InMemorySessionStore, Session, SessionStore, SessionSummary,
     default_session_dir,
 };
 pub use settings::{AnthropicSettings, CopilotSettings, ProviderKind, Settings};

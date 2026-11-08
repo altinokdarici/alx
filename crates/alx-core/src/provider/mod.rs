@@ -60,6 +60,18 @@ pub trait Provider: Send + Sync {
 
     async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse>;
 
+    /// Whether the provider keeps and compacts the conversation by itself
+    /// (Copilot). If not, the agent loop compacts the session it sends.
+    fn compacts_itself(&self) -> bool {
+        false
+    }
+
+    /// The model's context window in tokens, if known. Needed for automatic
+    /// compaction by the agent loop.
+    fn context_window(&self) -> Option<u64> {
+        None
+    }
+
     /// Compact the conversation now, if the provider keeps one it can
     /// compact. `Ok(None)` means there was nothing to compact. Providers that
     /// can't compact return an error (the default).

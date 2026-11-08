@@ -1,13 +1,16 @@
 //! The agent loop: drives provider <-> tools until the model ends its turn.
 
+use crate::compaction;
 use crate::event::EventSink;
 use crate::executor::Executor;
 use crate::provider::{CompletionRequest, CompletionResponse, Provider, TransientError};
-use crate::session::Session;
+use crate::session::{CompactionState, Session};
 use crate::tool::{Approval, ToolApprover, ToolContext, ToolOutput, ToolRegistry};
 use alx_protocol::{
-    ContentBlock, Event, Message, ModelInfo, ProviderInfo, Role, StopReason, Usage,
+    Compaction, ContentBlock, ContextUsage, Event, Message, ModelInfo, ProviderInfo, Role,
+    StopReason, Usage,
 };
+use anyhow::Context;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,10 +50,16 @@ pub trait AgentLoop: Send + Sync {
         options: &TurnOptions,
     ) -> anyhow::Result<StopReason>;
 
-    /// Compact the provider's view of the conversation now. Emits
-    /// [`Event::Compacted`] when something was compacted and returns whether
-    /// it was. Errors if the provider can't compact.
-    async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool>;
+    /// Compact the conversation now: the provider's own copy if it keeps one,
+    /// else the session's (see [`crate::compaction`]). `instructions` steer
+    /// the summary. Emits [`Event::Compacted`] when something was compacted
+    /// and returns whether it was.
+    async fn compact(
+        &self,
+        session: &mut Session,
+        instructions: Option<&str>,
+        events: &dyn EventSink,
+    ) -> anyhow::Result<bool>;
 
     /// The provider (and model) this agent talks to, for display.
     fn provider_info(&self) -> Option<ProviderInfo> {
@@ -129,10 +138,47 @@ impl SingleAgent {
             },
             None => self.tool_ctx.clone(),
         };
+        let window = self
+            .provider
+            .context_window()
+            .filter(|_| !self.provider.compacts_itself());
+        // Tokens the next request will carry: estimated at first, then taken
+        // from each response's usage.
+        let mut context_tokens: u64 = session
+            .request_messages()
+            .iter()
+            .map(compaction::estimate_tokens)
+            .sum();
+        // The context size at the last automatic attempt: don't try again
+        // until it has grown, in case the attempt couldn't free much.
+        let mut attempted_at: Option<u64> = None;
         loop {
+            if let Some(window) = window
+                && context_tokens > window.saturating_sub(compaction::RESERVE_TOKENS)
+                && attempted_at.is_none_or(|t| context_tokens > t + compaction::KEEP_RECENT_TOKENS)
+            {
+                attempted_at = Some(context_tokens);
+                let compacted = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Ok(mark_cancelled(session)),
+                    r = self.compact_session(session, None, events) => r?,
+                };
+                if compacted {
+                    attempted_at = None;
+                    context_tokens = session
+                        .request_messages()
+                        .iter()
+                        .map(compaction::estimate_tokens)
+                        .sum();
+                }
+            }
             let Some(resp) = self.request_with_retry(session, events, cancel).await? else {
                 return Ok(mark_cancelled(session));
             };
+            if let Some(u) = &resp.usage {
+                context_tokens =
+                    u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens;
+            }
             if resp.model.is_some() {
                 model.clone_from(&resp.model);
             }
@@ -158,6 +204,11 @@ impl SingleAgent {
             }
             if let Some(c) = resp.context {
                 events.emit(Event::ContextUsage(c));
+            } else if let (Some(limit), Some(_)) = (window, &resp.usage) {
+                events.emit(Event::ContextUsage(ContextUsage {
+                    used_tokens: context_tokens,
+                    limit_tokens: limit,
+                }));
             }
 
             if resp.stop_reason == StopReason::MaxTokens && !tool_calls.is_empty() {
@@ -319,6 +370,68 @@ fn backoff(attempt: u32) -> Duration {
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 impl SingleAgent {
+    /// Summarizes the older part of the session (see [`crate::compaction`]).
+    /// `Ok(false)` if there is too little to compact.
+    async fn compact_session(
+        &self,
+        session: &mut Session,
+        instructions: Option<&str>,
+        events: &dyn EventSink,
+    ) -> anyhow::Result<bool> {
+        let from = session.compaction.as_ref().map_or(0, |c| c.first_kept);
+        let Some(cut) =
+            compaction::find_cut(&session.messages, from, compaction::KEEP_RECENT_TOKENS)
+        else {
+            return Ok(false);
+        };
+        let before = session.request_messages();
+        let tokens_before: u64 = before.iter().map(compaction::estimate_tokens).sum();
+        // `before` starts at `from`, with the old summary merged or prepended.
+        let older = &before[..before.len() - (session.messages.len() - cut)];
+        let older_tokens: u64 = older.iter().map(compaction::estimate_tokens).sum();
+        if older_tokens < compaction::MIN_COMPACT_TOKENS {
+            // A summary would be about as long as what it replaces.
+            return Ok(false);
+        }
+        let resp = self
+            .provider
+            .complete(CompletionRequest {
+                system: compaction::SUMMARY_SYSTEM_PROMPT.into(),
+                messages: vec![compaction::summary_request(older, instructions)],
+                tools: Vec::new(),
+                max_tokens: self.config.max_tokens,
+            })
+            .await
+            .context("summarizing the conversation")?;
+        let summary: String = resp
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if summary.trim().is_empty() {
+            anyhow::bail!("the model returned an empty summary");
+        }
+        session.compaction = Some(CompactionState {
+            first_kept: cut,
+            summary,
+        });
+        let tokens_after = session
+            .request_messages()
+            .iter()
+            .map(compaction::estimate_tokens)
+            .sum();
+        events.emit(Event::Compacted(Compaction {
+            messages_removed: (cut - from) as u64,
+            tokens_before: Some(tokens_before),
+            tokens_after: Some(tokens_after),
+        }));
+        Ok(true)
+    }
+
     /// One model request, retried on transient errors. `None` if cancelled.
     async fn request_with_retry(
         &self,
@@ -333,7 +446,7 @@ impl SingleAgent {
             let request = self.provider.complete_streaming(
                 CompletionRequest {
                     system: self.config.system_prompt.clone(),
-                    messages: session.messages.clone(),
+                    messages: session.request_messages(),
                     tools: self.tools.specs(),
                     max_tokens: self.config.max_tokens,
                 },
@@ -392,7 +505,15 @@ impl AgentLoop for SingleAgent {
         self.provider.list_models().await
     }
 
-    async fn compact(&self, events: &dyn EventSink) -> anyhow::Result<bool> {
+    async fn compact(
+        &self,
+        session: &mut Session,
+        instructions: Option<&str>,
+        events: &dyn EventSink,
+    ) -> anyhow::Result<bool> {
+        if !self.provider.compacts_itself() {
+            return self.compact_session(session, instructions, events).await;
+        }
         let compaction = self.provider.compact().await?;
         if let Some(c) = compaction {
             events.emit(Event::Compacted(c));
@@ -409,6 +530,7 @@ impl AgentLoop for SingleAgent {
         options: &TurnOptions,
     ) -> anyhow::Result<StopReason> {
         let checkpoint = session.messages.len();
+        let compaction_before = session.compaction.clone();
         session.messages.push(input);
         events.emit(Event::TurnStarted);
         let mut model = None;
@@ -427,6 +549,14 @@ impl AgentLoop for SingleAgent {
             }
             Err(e) => {
                 session.messages.truncate(checkpoint);
+                // A compaction made in this turn may point past the rollback.
+                if session
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|c| c.first_kept > checkpoint)
+                {
+                    session.compaction = compaction_before;
+                }
                 Err(e)
             }
         }
@@ -447,6 +577,7 @@ mod tests {
     struct ScriptedProvider {
         responses: Mutex<VecDeque<anyhow::Result<CompletionResponse>>>,
         seen: Mutex<Vec<CompletionRequest>>,
+        window: Option<u64>,
     }
 
     impl ScriptedProvider {
@@ -454,6 +585,7 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into()),
                 seen: Mutex::default(),
+                window: None,
             }
         }
     }
@@ -465,6 +597,10 @@ mod tests {
                 name: "scripted".into(),
                 model: None,
             }
+        }
+
+        fn context_window(&self) -> Option<u64> {
+            self.window
         }
 
         async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
@@ -555,9 +691,8 @@ mod tests {
             assert!(events.contains(&Event::ContextUsage(context)));
         }
 
-        // The scripted provider can't compact: the error reaches the caller.
-        let err = agent.compact(&sink).await.unwrap_err();
-        assert!(err.to_string().contains("cannot compact"), "{err}");
+        // Too short to compact by alx's own compaction.
+        assert!(!agent.compact(&mut session, None, &sink).await.unwrap());
     }
 
     #[tokio::test]
@@ -688,6 +823,56 @@ mod tests {
             context: None,
             compactions: vec![],
         })
+    }
+
+    #[tokio::test]
+    async fn a_full_context_is_compacted_before_the_request() {
+        let mut provider = ScriptedProvider::new(vec![end_turn("SUM"), end_turn("ok")]);
+        provider.window = Some(30_000);
+        let provider = Arc::new(provider);
+        let agent = agent(provider.clone(), Arc::new(FakeExecutor::default()));
+        let sink = VecSink::default();
+        let mut session = Session::new("s");
+        for i in 0..6 {
+            session.messages.push(Message {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: vec![text(&format!("{i}{}", "x".repeat(40_000)))],
+            });
+        }
+        agent
+            .run_turn(
+                &mut session,
+                Message::user_text("hi"),
+                &sink,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen[0].system, compaction::SUMMARY_SYSTEM_PROMPT);
+        let ContentBlock::Text { text: asked } = &seen[0].messages[0].content[0] else {
+            panic!()
+        };
+        assert!(asked.contains("[User]: 2x") && !asked.contains("[User]: 4x"));
+        // The real request: summary, then the kept messages (4, 5, "hi", ...).
+        let first = &seen[1].messages[0];
+        assert!(matches!(&first.content[0], ContentBlock::Text { text } if text.contains("SUM")));
+        assert!(matches!(&first.content[1], ContentBlock::Text { text } if text.starts_with('4')));
+        assert_eq!(seen[1].messages.len(), 3);
+        assert_eq!(session.messages.len(), 8);
+        assert_eq!(session.compaction.as_ref().unwrap().first_kept, 4);
+        assert!(sink.0.lock().unwrap().iter().any(|e| matches!(
+            e,
+            Event::Compacted(Compaction {
+                messages_removed: 4,
+                ..
+            })
+        )));
     }
 
     #[tokio::test]

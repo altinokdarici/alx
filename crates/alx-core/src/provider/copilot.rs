@@ -302,6 +302,10 @@ impl CopilotProvider {
 
 #[async_trait]
 impl Provider for CopilotProvider {
+    fn compacts_itself(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             name: "copilot".into(),

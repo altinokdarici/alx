@@ -554,7 +554,7 @@ impl Repl {
                 }
                 continue;
             }
-            if input == "/compact" {
+            if input == "/compact" || input.starts_with("/compact ") {
                 *self.compacted.lock().unwrap() = None;
                 if let Err(e) = prompt(&session, input).await {
                     eprintln!("{}", render::error_line(style, &e.to_string()));

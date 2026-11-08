@@ -352,6 +352,11 @@ fn usage_from_wire(u: &Value) -> Usage {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn context_window(&self) -> Option<u64> {
+        // Every current Claude model; the 1M-token window is opt-in (beta).
+        Some(200_000)
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             name: "anthropic".into(),

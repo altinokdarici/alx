@@ -38,14 +38,15 @@ pub const MODEL_OPTION: &str = "model";
 pub const DEFAULT_MODEL: &str = "default";
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
-    ClientCapabilities, CompactionStatus, CompactionUpdate, ContentBlock, Implementation,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification, ClientCapabilities, CompactionStatus, CompactionUpdate, ContentBlock,
+    Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
     LoadSessionResponse, Meta, NewSessionRequest, NewSessionResponse, PromptRequest,
     PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
     SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Usage as AcpUsage,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    UnstructuredCommandInput, Usage as AcpUsage,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use alx_core::protocol::{Compaction, Event, Message, Usage};
@@ -193,8 +194,18 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
 /// The slash commands alx handles itself instead of sending to the model.
 fn commands_update() -> SessionUpdate {
     SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
-        AvailableCommand::new("compact", "Compact the conversation to free up context"),
+        AvailableCommand::new("compact", "Compact the conversation to free up context").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+                "optional instructions for the summary",
+            )),
+        ),
     ]))
+}
+
+/// The instructions after `/compact` (maybe empty), if `text` is that command.
+fn compact_command(text: &str) -> Option<&str> {
+    let rest = text.trim().strip_prefix("/compact")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 fn acp_usage(u: &Usage) -> AcpUsage {
@@ -206,7 +217,12 @@ fn acp_usage(u: &Usage) -> AcpUsage {
 
 /// Runs `/compact`: reports progress as `compaction_update`s and ends the
 /// turn. A provider that can't compact fails the compaction, not the turn.
-async fn compact(agent: &dyn AgentLoop, sink: &AcpSink) {
+async fn compact(
+    agent: &dyn AgentLoop,
+    session: &mut Session,
+    instructions: Option<&str>,
+    sink: &AcpSink,
+) {
     let id = "manual-compaction";
     sink.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
         id,
@@ -222,7 +238,7 @@ async fn compact(agent: &dyn AgentLoop, sink: &AcpSink) {
         }
     }
     let caught = Catch(Mutex::new(None));
-    let done = match agent.compact(&caught).await {
+    let done = match agent.compact(session, instructions, &caught).await {
         Ok(_) => match caught.0.lock().unwrap().take() {
             Some(c) => events::compaction_update(id.into(), &c),
             None => SessionUpdate::CompactionUpdate(CompactionUpdate::new(
@@ -420,9 +436,15 @@ pub async fn serve(
                         let mut session = live.session.lock().await;
                         let agent = live.agent.lock().unwrap().clone();
                         let text = prompt_text(&req.prompt);
-                        if text.trim() == "/compact" {
-                            compact(&*agent, &sink).await;
+                        if let Some(rest) = compact_command(&text) {
+                            let instructions = Some(rest).filter(|r| !r.is_empty());
+                            compact(&*agent, &mut session, instructions, &sink).await;
                             *live.cancel.lock().unwrap() = None;
+                            if let Err(e) = server.store.save(&session).await {
+                                return responder.respond_with_error(
+                                    Error::internal_error().data(format!("{e:#}")),
+                                );
+                            }
                             return responder.respond(PromptResponse::new(StopReason::EndTurn));
                         }
                         let cwd = session

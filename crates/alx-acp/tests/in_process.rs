@@ -449,7 +449,8 @@ async fn compactions_become_compaction_updates() {
         tokens_before: Some(1000),
         tokens_after: Some(100),
     }];
-    // The scripted provider can't compact on request, so `/compact` fails.
+    // The conversation is too short for alx's own compaction: `/compact`
+    // completes with nothing done.
     let run = run(
         vec![compacted],
         ClientCapabilities::new(),
@@ -474,7 +475,7 @@ async fn compactions_become_compaction_updates() {
     assert_eq!(meta["messagesRemoved"], 4);
     assert_eq!(meta["tokensAfter"], 100);
     assert_eq!(compactions[1].status, CompactionStatus::InProgress);
-    assert_eq!(compactions[2].status, CompactionStatus::Failed);
+    assert_eq!(compactions[2].status, CompactionStatus::Completed);
     assert_eq!(compactions[1].compaction_id, compactions[2].compaction_id);
 }
 
