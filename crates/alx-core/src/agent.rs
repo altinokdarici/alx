@@ -91,6 +91,50 @@ pub struct TurnOptions {
     /// Ask this before each call to a tool that is not read-only. `None`
     /// runs every call.
     pub approver: Option<Arc<dyn ToolApprover>>,
+    /// Messages the user sent while the turn runs. See [`Steering`].
+    pub steering: Option<Steering>,
+}
+
+/// A queue of user messages for a running turn. The agent loop takes them
+/// after each batch of tool results (added to that user message, so the
+/// model sees them before its next step) and when the model would end the
+/// turn (then the turn goes on with them). Cloning shares the queue.
+#[derive(Clone, Default)]
+pub struct Steering(Arc<std::sync::Mutex<SteeringQueue>>);
+
+#[derive(Default)]
+struct SteeringQueue {
+    next_id: u64,
+    items: std::collections::VecDeque<(u64, Message)>,
+}
+
+impl Steering {
+    /// Queues `message`; the id lets the sender [`take`](Self::take) it back
+    /// if no turn used it.
+    pub fn push(&self, message: Message) -> u64 {
+        let mut q = self.0.lock().unwrap();
+        q.next_id += 1;
+        let id = q.next_id;
+        q.items.push_back((id, message));
+        id
+    }
+
+    /// Removes and returns message `id`, if it is still queued.
+    pub fn take(&self, id: u64) -> Option<Message> {
+        let mut q = self.0.lock().unwrap();
+        let i = q.items.iter().position(|(i, _)| *i == id)?;
+        q.items.remove(i).map(|(_, m)| m)
+    }
+
+    fn drain(&self) -> Vec<Message> {
+        self.0
+            .lock()
+            .unwrap()
+            .items
+            .drain(..)
+            .map(|(_, m)| m)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +286,14 @@ impl SingleAgent {
                 continue;
             }
             if resp.stop_reason != StopReason::ToolUse || tool_calls.is_empty() {
+                let queued = steered(options);
+                if resp.stop_reason == StopReason::EndTurn && !queued.is_empty() {
+                    session.messages.push(Message {
+                        role: Role::User,
+                        content: queued,
+                    });
+                    continue;
+                }
                 return Ok(resp.stop_reason);
             }
 
@@ -338,7 +390,7 @@ impl SingleAgent {
                 .await
             };
             cancelled |= cancel.is_cancelled();
-            let results = outputs
+            let mut results: Vec<ContentBlock> = outputs
                 .into_iter()
                 .map(|(id, out)| ContentBlock::ToolResult {
                     tool_use_id: id,
@@ -346,6 +398,9 @@ impl SingleAgent {
                     is_error: out.is_error,
                 })
                 .collect();
+            if !cancelled {
+                results.extend(steered(options));
+            }
             session.messages.push(Message {
                 role: Role::User,
                 content: results,
@@ -355,6 +410,18 @@ impl SingleAgent {
             }
         }
     }
+}
+
+/// The content of the messages queued for this turn, if any.
+fn steered(options: &TurnOptions) -> Vec<ContentBlock> {
+    options
+        .steering
+        .as_ref()
+        .map(Steering::drain)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|m| m.content)
+        .collect()
 }
 
 const TRUNCATED_CALL: &str = "Not executed: your response hit the output token limit, so \
@@ -876,6 +943,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn steering_joins_tool_results_and_extends_the_turn() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: json!({"input": "ls"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: None,
+                usage: None,
+                context: None,
+                compactions: vec![],
+            }),
+            end_turn("a"),
+            end_turn("b"),
+            end_turn("c"),
+        ]));
+        let agent = agent(provider, Arc::new(FakeExecutor::default()));
+        let steering = Steering::default();
+        steering.push(Message::user_text("use -la"));
+        let options = TurnOptions {
+            steering: Some(steering.clone()),
+            ..Default::default()
+        };
+        let mut session = Session::new("s");
+        agent
+            .run_turn_with(
+                &mut session,
+                Message::user_text("hi"),
+                &crate::event::NullSink,
+                &CancellationToken::new(),
+                &options,
+            )
+            .await
+            .unwrap();
+        // Taken with the tool results; the turn then ends at "a".
+        assert_eq!(session.messages[2].content[1], text("use -la"));
+        assert_eq!(session.messages.len(), 4);
+
+        let id = steering.push(Message::user_text("and then?"));
+        steering.push(Message::user_text("also"));
+        assert_eq!(steering.take(id), Some(Message::user_text("and then?")));
+        agent
+            .run_turn_with(
+                &mut session,
+                Message::user_text("again"),
+                &crate::event::NullSink,
+                &CancellationToken::new(),
+                &options,
+            )
+            .await
+            .unwrap();
+        // "also" was still queued when "b" would have ended the turn, so the
+        // turn went on with it.
+        assert_eq!(session.messages[6], Message::user_text("also"));
+        assert_eq!(session.messages[7].content, vec![text("c")]);
+    }
+
+    #[tokio::test]
     async fn transient_errors_are_retried() {
         let provider = Arc::new(ScriptedProvider::new(vec![
             Err(transient()),
@@ -1219,6 +1346,7 @@ mod tests {
         let options = TurnOptions {
             executor: Some(turn_exec.clone()),
             approver: Some(approver.clone()),
+            steering: None,
         };
         let mut session = Session::new("s");
 

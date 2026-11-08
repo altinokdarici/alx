@@ -859,3 +859,73 @@ async fn sessions_list_and_switch_models() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_prompt_during_a_turn_steers_it() {
+    /// Slow first reply, so the second prompt arrives mid-turn.
+    struct Slow(Mutex<Vec<CompletionRequest>>);
+    #[async_trait]
+    impl Provider for Slow {
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                name: "slow".into(),
+                model: None,
+            }
+        }
+        async fn complete(&self, req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+            let n = {
+                let mut seen = self.0.lock().unwrap();
+                seen.push(req);
+                seen.len()
+            };
+            if n == 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            Ok(reply(vec![text(&format!("reply {n}"))]))
+        }
+    }
+    let provider = Arc::new(Slow(Mutex::default()));
+    let agent = Arc::new(SingleAgent {
+        config: AgentConfig::default(),
+        provider: provider.clone(),
+        tools: ToolRegistry::new(),
+        tool_ctx: ToolContext {
+            executor: Arc::new(LocalExecutor),
+        },
+    });
+    let client_end = alx_acp::native(Fixed::one(agent), Arc::new(InMemorySessionStore::default()));
+    let replies = Client
+        .builder()
+        .connect_with(client_end, async move |cx: ConnectionTo<Agent>| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .send_request(NewSessionRequest::new("/tmp"))
+                .block_task()
+                .await?
+                .session_id;
+            let send = |t: &str| {
+                cx.send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::Text(TextContent::new(t))],
+                ))
+                .block_task()
+            };
+            let first = send("hi");
+            let second = async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                send("steer").await
+            };
+            let (a, b) = tokio::join!(first, second);
+            Ok((a?, b?))
+        })
+        .await
+        .unwrap();
+    assert_eq!(replies.0.stop_reason, StopReason::EndTurn);
+    assert_eq!(replies.1.stop_reason, StopReason::EndTurn);
+    let seen = provider.0.lock().unwrap();
+    assert_eq!(seen.len(), 2, "one turn, extended by the steering prompt");
+    let last = seen[1].messages.last().unwrap();
+    assert_eq!(last.content, vec![text("steer")]);
+}

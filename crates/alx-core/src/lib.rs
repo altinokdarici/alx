@@ -26,7 +26,7 @@ pub mod settings;
 pub mod tool;
 pub mod tools;
 
-pub use agent::{AgentConfig, AgentFactory, AgentLoop, SingleAgent, TurnOptions};
+pub use agent::{AgentConfig, AgentFactory, AgentLoop, SingleAgent, Steering, TurnOptions};
 pub use env::{SettingsAgentFactory, agent_from_settings, load_dotenv, provider_from_settings};
 pub use event::EventSink;
 pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};

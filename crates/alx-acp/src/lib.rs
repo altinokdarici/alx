@@ -52,7 +52,7 @@ use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use alx_core::protocol::{Compaction, Event, Message, Usage};
 use alx_core::{
     AgentFactory, AgentLoop, Approval, CancellationToken, EventSink, Session, SessionStore,
-    TurnOptions,
+    Steering, TurnOptions,
 };
 use client_env::{ClientApprover, ClientExecutor};
 use events::AcpSink;
@@ -67,6 +67,8 @@ struct Live {
     agent: Mutex<Arc<dyn AgentLoop>>,
     cancel: Mutex<Option<CancellationToken>>,
     always: Arc<Mutex<HashMap<String, Approval>>>,
+    /// Prompts sent while a turn runs, for that turn to pick up.
+    steering: Steering,
 }
 
 struct Server {
@@ -120,6 +122,7 @@ impl Server {
             agent: Mutex::new(agent),
             cancel: Mutex::new(None),
             always: Arc::default(),
+            steering: Steering::default(),
         });
         self.live.lock().unwrap().insert(id, live);
         Ok(opened)
@@ -430,12 +433,27 @@ pub async fn serve(
                     // A turn takes a long time; running it here would block the
                     // dispatch loop, and with it `session/cancel`.
                     cx.clone().spawn(async move {
+                        let text = prompt_text(&req.prompt);
+                        // A prompt during a turn steers that turn. It answers
+                        // once the turn is over; if the turn ended without
+                        // taking it, it runs as a turn of its own.
+                        let mut session = match live.session.try_lock() {
+                            Ok(session) => session,
+                            Err(_) if compact_command(&text).is_some() => live.session.lock().await,
+                            Err(_) => {
+                                let id = live.steering.push(Message::user_text(text.clone()));
+                                let session = live.session.lock().await;
+                                if live.steering.take(id).is_none() {
+                                    return responder
+                                        .respond(PromptResponse::new(StopReason::EndTurn));
+                                }
+                                session
+                            }
+                        };
                         let cancel = CancellationToken::new();
                         *live.cancel.lock().unwrap() = Some(cancel.clone());
                         let sink = AcpSink::new(cx.clone(), req.session_id.clone());
-                        let mut session = live.session.lock().await;
                         let agent = live.agent.lock().unwrap().clone();
-                        let text = prompt_text(&req.prompt);
                         if let Some(rest) = compact_command(&text) {
                             let instructions = Some(rest).filter(|r| !r.is_empty());
                             compact(&*agent, &mut session, instructions, &sink).await;
@@ -463,6 +481,7 @@ pub async fn serve(
                                 session: req.session_id.clone(),
                                 always: live.always.clone(),
                             })),
+                            steering: Some(live.steering.clone()),
                         };
                         let result = agent
                             .run_turn_with(

@@ -70,6 +70,13 @@ history if you need it as a reference.
   later compaction folds the previous summary in. Under 2,000 tokens to remove
   does nothing. The agent also emits `ContextUsage` from `Usage` for these
   providers.
+- Steering: `TurnOptions::steering` is a queue (`Steering`) of user messages
+  for the running turn. The loop adds queued messages to the next tool-results
+  message, and when the model would end the turn (`EndTurn`) it continues with
+  them instead. Over ACP, a `session/prompt` that arrives while a turn runs is
+  queued that way and answered (`end_turn`) when the turn ends; if the turn
+  ended without taking it, it runs as its own turn. The CLI can't type during
+  a turn yet, so it doesn't steer.
 - Tool calls in one model response run concurrently: approvals are asked in
   order first, then the approved calls run together (`join_all`) and the
   results go back in call order. If any call's tool returns
