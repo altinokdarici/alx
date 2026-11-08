@@ -15,6 +15,7 @@
 //! any UI can be plugged in on top.
 
 pub mod agent;
+pub mod context;
 pub mod env;
 pub mod event;
 pub mod executor;

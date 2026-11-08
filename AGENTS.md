@@ -100,8 +100,11 @@ history if you need it as a reference.
   pattern without `/` against file names at any depth, else the relative path
   (`globset`). The fallbacks are tested by running the tests with no `rg` on
   `PATH`.
-- `./AGENTS.md` in the working directory, if present, is appended to the system
-  prompt (in `agent_from_settings`). No search up the tree, no toggle yet.
+- System prompt (`context.rs`, wired in `agent_from_settings`): the base
+  prompt, then an `<environment>` block (working directory, OS, today's UTC
+  date; no time, so the prompt cache holds all day), then context files in
+  `<project_context>`: `~/.config/alx/AGENTS.md`, then one file per directory
+  from `/` down to the cwd (`AGENTS.md`, else `CLAUDE.md`), most specific last.
 - Sessions are saved after every turn by `FileSessionStore` (one JSONL file per
   session: a header line, then one message per line) in `session_dir`
   (default `~/.local/share/alx/sessions`). `alx --continue` resumes the latest

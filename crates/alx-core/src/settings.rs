@@ -199,12 +199,16 @@ impl Settings {
     }
 }
 
-fn user_config_path() -> Option<PathBuf> {
+pub(crate) fn user_config_dir() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
     };
-    Some(base.join("alx").join("config.toml"))
+    Some(base.join("alx"))
+}
+
+fn user_config_path() -> Option<PathBuf> {
+    Some(user_config_dir()?.join("config.toml"))
 }
 
 #[cfg(test)]
