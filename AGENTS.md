@@ -77,8 +77,10 @@ history if you need it as a reference.
   queued that way and answered (`end_turn`) when the turn ends; if the turn
   ended without taking it, it runs as its own turn. The CLI steers on a TTY
   (Unix): during a turn `steer.rs` polls fd 0 (raw `libc::read`, so rustyline
-  loses no buffered input) and each line typed is sent as a prompt. Piped
-  stdin doesn't steer. Typed echo may interleave with streamed output.
+  loses no buffered input) and each line typed is sent as a prompt. During the turn
+  the last terminal row is an input line (the rows above are a scroll region,
+  echo off), so typing never mixes with output; text not sent when the turn
+  ends pre-fills the next prompt. Piped stdin doesn't steer.
 - Tool calls in one model response run concurrently: approvals are asked in
   order first, then the approved calls run together (`join_all`) and the
   results go back in call order. If any call's tool returns

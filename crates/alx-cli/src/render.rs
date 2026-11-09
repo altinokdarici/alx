@@ -185,6 +185,22 @@ impl Renderer {
         }
     }
 
+    /// `line` on a line of its own, first ending whatever is half-printed (a
+    /// thinking hint, or a tool call's line awaiting its result, which then
+    /// gets a line of its own).
+    pub fn note(&self, line: &str) -> String {
+        let mut st = self.state.lock().unwrap();
+        let before = if st.thinking {
+            CLEAR_LINE
+        } else if st.open_call.take().is_some() {
+            "\n"
+        } else {
+            ""
+        };
+        st.thinking = false;
+        format!("{before}{line}\n")
+    }
+
     /// The text to print for `event` (it carries its own newlines), or `None`.
     pub fn handle(&self, event: &Event) -> Option<String> {
         let style = &self.style;
@@ -394,6 +410,16 @@ impl CliRenderer {
         Self {
             renderer: Renderer::new(style, verbose),
         }
+    }
+}
+
+impl CliRenderer {
+    /// Prints `line` on a line of its own; see [`Renderer::note`].
+    pub fn note(&self, line: &str) {
+        let text = self.renderer.note(line);
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "{text}");
+        let _ = out.flush();
     }
 }
 
@@ -708,5 +734,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(s, "\n● fresh\n");
+    }
+
+    #[test]
+    fn note_ends_an_open_call_line() {
+        let r = Renderer::new(PLAIN, false);
+        let started = call(&r, "sleep 5");
+        assert!(!started.ends_with('\n'));
+        assert_eq!(r.note("steer"), "\nsteer\n");
+        // The result then gets a line of its own instead of joining the note.
+        let done = finish(&r, "ok", false);
+        assert!(done.contains("sleep 5"), "{done:?}");
     }
 }

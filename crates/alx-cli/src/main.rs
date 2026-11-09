@@ -435,6 +435,8 @@ impl Repl {
         }));
         let mut editor = Some(rl);
 
+        // Text typed during a turn but not sent; the next prompt starts with it.
+        let mut carry = String::new();
         loop {
             // The values `/model` and `/provider` complete to, as of now.
             {
@@ -444,8 +446,9 @@ impl Repl {
             }
             let prompt_text = render::prompt(style);
             let mut rl = editor.take().expect("editor is put back after each read");
+            let initial = std::mem::take(&mut carry);
             let (rl, read) = tokio::task::spawn_blocking(move || {
-                let read = rl.readline(&prompt_text);
+                let read = rl.readline_with_initial(&prompt_text, (&initial, ""));
                 (rl, read)
             })
             .await?;
@@ -600,7 +603,7 @@ impl Repl {
                             if let Some(rl) = editor.as_mut() {
                                 let _ = rl.add_history_entry(line);
                             }
-                            println!("{}", style.dim(&format!("↪ steering: {line}")));
+                            self.renderer.note(&style.dim(&format!("↪ steering: {line}")));
                             steered.push(Box::pin(prompt(&session, line)));
                         }
                         _ = tokio::signal::ctrl_c() => {
@@ -617,7 +620,7 @@ impl Repl {
             };
             stop_steering.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(reader) = steer_reader {
-                let _ = reader.await;
+                carry = reader.await.unwrap_or_default();
             }
             // A steering message the turn didn't take runs as a turn of its
             // own; wait for those too.
