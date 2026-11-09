@@ -73,7 +73,7 @@ fn pop_char(buf: &mut Vec<u8>) {
 /// but not yet sent, for the next prompt to start with.
 #[cfg(unix)]
 pub fn read_lines(stop: &AtomicBool, tx: &UnboundedSender<String>) -> String {
-    let Some(_screen) = Screen::enter() else {
+    let Some(mut screen) = Screen::enter() else {
         return String::new();
     };
     let mut keys = Keys::default();
@@ -81,6 +81,9 @@ pub fn read_lines(stop: &AtomicBool, tx: &UnboundedSender<String>) -> String {
     let mut buf = [0u8; 1024];
     Screen::draw(&line);
     while !stop.load(Ordering::Relaxed) {
+        if screen.resized() {
+            Screen::draw(&line);
+        }
         let mut fd = libc::pollfd {
             fd: 0,
             events: libc::POLLIN,
@@ -150,11 +153,36 @@ impl Screen {
         if unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) } != 0 {
             return None;
         }
-        // Make room for the input row (a newline then back up, which scrolls
-        // if the cursor is on the last row), then limit scrolling to the rows
-        // above it. Setting the region homes the cursor, hence save/restore.
-        write(&format!("\n\x1b[A\x1b7\x1b[1;{}r\x1b8", rows - 1));
+        Self::reserve(rows);
         Some(Self { saved, rows })
+    }
+
+    /// Make room for the input row (a newline then back up, which scrolls if
+    /// the cursor is on the last row), then limit scrolling to the rows above
+    /// it. Setting the region homes the cursor, hence save/restore.
+    fn reserve(rows: u16) {
+        write(&format!("\n\x1b[A\x1b7\x1b[1;{}r\x1b8", rows - 1));
+    }
+
+    /// After a resize, moves the input row to the new last row. Returns
+    /// whether it moved (so it needs drawing).
+    fn resized(&mut self) -> bool {
+        let Some(rows) = Self::rows() else {
+            return false;
+        };
+        if rows == self.rows {
+            return false;
+        }
+        // Terminals reset the scroll region on resize. On a taller terminal
+        // the old input row is now mid-screen: clear it.
+        let mut clear = String::from("\x1b7\x1b[r\x1b8");
+        if self.rows < rows {
+            clear += &format!("\x1b7\x1b[{};1H\x1b[2K\x1b8", self.rows);
+        }
+        write(&clear);
+        Self::reserve(rows);
+        self.rows = rows;
+        true
     }
 
     /// Draws the input row: a dim arrow, then the typed text (its tail, if
