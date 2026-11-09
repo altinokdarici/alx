@@ -29,6 +29,26 @@ pub struct ExecOutput {
     pub timed_out: bool,
 }
 
+/// An HTTP response from [`Executor::fetch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    /// Cut at the `max_bytes` asked for.
+    pub body: Vec<u8>,
+}
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(concat!("alx/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("a default reqwest client")
+    })
+}
+
 #[async_trait]
 pub trait Executor: Send + Sync {
     /// Run a process to completion. `Err` means it could not be run at all
@@ -56,6 +76,35 @@ pub trait Executor: Send + Sync {
             tokio::fs::create_dir_all(dir).await?;
         }
         tokio::fs::write(path, content).await
+    }
+
+    /// HTTP GET `url` from wherever this executor runs, reading at most
+    /// `max_bytes` of the body. The default fetches from the host.
+    async fn fetch(&self, url: &str, max_bytes: usize) -> std::io::Result<FetchResponse> {
+        let mut resp = http_client()
+            .get(url)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(std::io::Error::other)? {
+            body.extend_from_slice(&chunk);
+            if body.len() >= max_bytes {
+                body.truncate(max_bytes);
+                break;
+            }
+        }
+        Ok(FetchResponse {
+            status,
+            content_type,
+            body,
+        })
     }
 }
 

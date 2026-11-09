@@ -105,7 +105,7 @@ history if you need it as a reference.
   `tool_result` content; Copilot sends them as `binaryResultsForLlm`, and user
   images as `Attachment::Blob`. ACP prompt images (`prompt_capabilities.image`)
   become user image blocks. Copilot's replay transcript drops images.
-- `web_fetch` (`tools/web.rs`) GETs an http(s) URL with reqwest (30s
+- `web_fetch` (`tools/web.rs`) GETs an http(s) URL through `Executor::fetch` (default: reqwest on the host, so a Docker or remote executor fetches from where it runs; 30s
   timeout, body read up to 5 MB), converts HTML to text with a small built-in
   converter (no extra crate), and pages output in 50000-byte windows by
   `offset`. Runs on the host, not through the executor.

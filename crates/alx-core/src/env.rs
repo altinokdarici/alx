@@ -35,7 +35,7 @@ pub fn agent_from_settings(settings: &Settings) -> anyhow::Result<SingleAgent> {
             .with(GrepTool)
             .with(GlobTool)
             .with(ListDirTool)
-            .with(WebFetchTool::default())
+            .with(WebFetchTool)
             .with(TodoWriteTool),
         tool_ctx: ToolContext {
             executor: Arc::new(LocalExecutor),

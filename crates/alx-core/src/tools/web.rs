@@ -1,28 +1,15 @@
 //! `web_fetch`: read a web page as text.
 
+use crate::executor::FetchResponse;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use alx_protocol::ToolSpec;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::time::Duration;
 
 /// Fetches a URL and returns its body as text, HTML converted to plain text.
-#[derive(Debug, Clone)]
-pub struct WebFetchTool {
-    client: reqwest::Client,
-}
-
-impl Default for WebFetchTool {
-    fn default() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .user_agent(concat!("alx/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .expect("a default reqwest client"),
-        }
-    }
-}
+/// The request goes through the executor, so it runs where commands run.
+#[derive(Debug, Clone, Default)]
+pub struct WebFetchTool;
 
 impl WebFetchTool {
     const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -54,7 +41,7 @@ impl Tool for WebFetchTool {
         true
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolContext) -> ToolOutput {
+    async fn call(&self, input: Value, ctx: &ToolContext) -> ToolOutput {
         let Some(url) = input.get("url").and_then(Value::as_str) else {
             return ToolOutput::error("web_fetch needs a `url` string");
         };
@@ -62,42 +49,30 @@ impl Tool for WebFetchTool {
             return ToolOutput::error("web_fetch only fetches http:// and https:// URLs");
         }
         let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-        match self.fetch(url).await {
-            Ok((status, text)) if status.is_success() => {
-                ToolOutput::ok(page(&text, offset, Self::MAX_OUTPUT_BYTES))
+        match ctx.executor.fetch(url, Self::MAX_BODY_BYTES).await {
+            Ok(resp) if (200..300).contains(&resp.status) => {
+                ToolOutput::ok(page(&body_text(&resp), offset, Self::MAX_OUTPUT_BYTES))
             }
-            Ok((status, text)) => {
-                ToolOutput::error(format!("HTTP {status}\n{}", page(&text, 0, 2_000)))
-            }
+            Ok(resp) => ToolOutput::error(format!(
+                "HTTP {}\n{}",
+                resp.status,
+                page(&body_text(&resp), 0, 2_000)
+            )),
             Err(e) => ToolOutput::error(format!("Could not fetch {url}: {e:#}")),
         }
     }
 }
 
-impl WebFetchTool {
-    async fn fetch(&self, url: &str) -> anyhow::Result<(reqwest::StatusCode, String)> {
-        let mut resp = self.client.get(url).send().await?;
-        let status = resp.status();
-        let is_html = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("html"));
-        let mut body = Vec::new();
-        while let Some(chunk) = resp.chunk().await? {
-            body.extend_from_slice(&chunk);
-            if body.len() >= Self::MAX_BODY_BYTES {
-                body.truncate(Self::MAX_BODY_BYTES);
-                break;
-            }
-        }
-        let raw = String::from_utf8_lossy(&body);
-        let text = if is_html {
-            html_to_text(&raw)
-        } else {
-            raw.into_owned()
-        };
-        Ok((status, text))
+fn body_text(resp: &FetchResponse) -> String {
+    let raw = String::from_utf8_lossy(&resp.body);
+    if resp
+        .content_type
+        .as_deref()
+        .is_some_and(|ct| ct.contains("html"))
+    {
+        html_to_text(&raw)
+    } else {
+        raw.into_owned()
     }
 }
 
@@ -315,9 +290,37 @@ mod tests {
         let ctx = ToolContext {
             executor: std::sync::Arc::new(crate::LocalExecutor),
         };
-        let out = WebFetchTool::default()
+        let out = WebFetchTool
             .call(json!({"url": "file:///etc/passwd"}), &ctx)
             .await;
         assert!(out.is_error);
+    }
+
+    struct FakeWeb;
+
+    #[async_trait]
+    impl crate::Executor for FakeWeb {
+        async fn run(&self, _: crate::ExecRequest) -> std::io::Result<crate::ExecOutput> {
+            unreachable!()
+        }
+        async fn fetch(&self, url: &str, _: usize) -> std::io::Result<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                content_type: Some("text/html".into()),
+                body: format!("<p>from {url}</p>").into_bytes(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn fetches_through_the_executor() {
+        let ctx = ToolContext {
+            executor: std::sync::Arc::new(FakeWeb),
+        };
+        let out = WebFetchTool
+            .call(json!({"url": "https://x.test/"}), &ctx)
+            .await;
+        assert!(!out.is_error);
+        assert_eq!(out.content.trim(), "from https://x.test/");
     }
 }

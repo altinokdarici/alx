@@ -29,7 +29,7 @@ pub mod tools;
 pub use agent::{AgentConfig, AgentFactory, AgentLoop, SingleAgent, Steering, TurnOptions};
 pub use env::{SettingsAgentFactory, agent_from_settings, load_dotenv, provider_from_settings};
 pub use event::EventSink;
-pub use executor::{ExecOutput, ExecRequest, Executor, LocalExecutor};
+pub use executor::{ExecOutput, ExecRequest, Executor, FetchResponse, LocalExecutor};
 pub use provider::anthropic::{AnthropicConfig, AnthropicProvider};
 #[cfg(feature = "copilot")]
 pub use provider::copilot::{CopilotConfig, CopilotProvider};
